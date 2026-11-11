@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "status": "blocked",
+  "baseline": "provisional",
+  "results": [
+    {
+      "item": "proposed pins and replacement review",
+      "status": "blocked",
+      "reason": "No reviewed dependency evidence has been supplied."
+    },
+    {
+      "item": "go.sum",
+      "status": "blocked",
+      "reason": "Generate from reviewed module inputs with the intake command."
+    },
+    {
+      "item": "vendor/",
+      "status": "blocked",
+      "reason": "Generate from reviewed module inputs with the intake command."
+    },
+    {
+      "item": "compiler archive identities and SHA-256",
+      "status": "blocked",
+      "reason": "No compiler archive or trusted digest has been supplied or observed."
+    },
+    {
+      "item": "Windows SDK, native qualification and reproducibility",
+      "status": "blocked",
+      "reason": "A reviewed native environment and candidate-bound evidence are not available."
+    }
+  ]
+}

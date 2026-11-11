@@ -1,0 +1,8 @@
+# Local dependency-intake work and recovery state.
+build/.intake-work-*/
+build/.intake-backup-*/
+build/.intake-pending.json
+
+# Local build products.
+*.exe
+*.test

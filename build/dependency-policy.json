@@ -1,0 +1,48 @@
+{
+  "schema": 1,
+  "status": "unverified",
+  "bootstrap": "go.mod is provisional and is not a reproducible release baseline. Its Go directive is a bootstrap minimum, not the selected toolchain.",
+  "pins": [
+    {
+      "id": "go",
+      "proposed": "1.27.3",
+      "status": "unverified"
+    },
+    {
+      "id": "raylib",
+      "module": "github.com/gen2brain/raylib-go/raylib",
+      "proposed": "v0.55.1",
+      "status": "unverified"
+    },
+    {
+      "id": "gcc",
+      "proposed": "14.2.0",
+      "status": "unverified"
+    },
+    {
+      "id": "mingw",
+      "proposed": "12.0.0",
+      "status": "unverified"
+    },
+    {
+      "id": "monkit",
+      "module": "github.com/spacemonkeygo/monkit/v3",
+      "proposed": "v3.0.24",
+      "status": "unverified"
+    },
+    {
+      "id": "errs",
+      "module": "github.com/zeebo/errs",
+      "proposed": "v1.4.0",
+      "status": "unverified"
+    }
+  ],
+  "compilerTarget": "windows/amd64; UCRT; POSIX threads; x86-64 SEH",
+  "requirements": [
+    "Review availability, provenance, source contents, build suitability, security and licenses for every selected component and transitive module.",
+    "Record a reviewer and rationale for every replacement of a proposed pin.",
+    "Inspect the binding's bundled raylib, GLFW and every decoder, including revisions and license texts.",
+    "Compare observed archive digests with separately reviewed trusted digests.",
+    "Do not freeze a baseline until Windows SDK inputs, native builds, licensing and reproducibility evidence are reviewed."
+  ]
+}
