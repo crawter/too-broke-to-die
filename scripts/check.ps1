@@ -35,7 +35,7 @@ try {
     if (-not $go) {
         Write-Host 'BLOCKED: Go source checks require a local Go toolchain'
     } elseif ($files.Count -eq 0) {
-        Write-Host 'UNRUN: Go formatting, vet, tests and race tests; no Go source exists'
+        Write-Host 'UNRUN: Go source architecture, formatting, vet, tests and race tests; no Go source exists'
     } else {
         $gofmt = Get-Command gofmt -ErrorAction SilentlyContinue
         if (-not $gofmt) {
@@ -50,16 +50,26 @@ try {
             }
         }
         if (-not (Test-Path -LiteralPath 'vendor/modules.txt') -or
+            -not (Test-Path -LiteralPath 'go.sum') -or
+            -not (Test-Path -LiteralPath 'build/toolchain-lock.json') -or
             (Test-Path -LiteralPath 'build/.intake-pending.json')) {
-            Write-Host 'BLOCKED: vet, tests and race tests require completed dependency intake'
+            Write-Host 'BLOCKED: source architecture check, vet, tests and race tests require completed dependency intake'
         } else {
             $saved = @{}
-            $settings = @{ GOTOOLCHAIN = 'local'; GOWORK = 'off'; GOPROXY = 'off'; GOSUMDB = 'off'; GOFLAGS = '-mod=vendor' }
+            $settings = @{ GOTOOLCHAIN = 'local'; GOWORK = 'off'; GOENV = 'off'; GOPROXY = 'off'; GOSUMDB = 'off'; GOFLAGS = '-mod=vendor' }
             foreach ($key in $settings.Keys) {
                 $saved[$key] = [System.Environment]::GetEnvironmentVariable($key, 'Process')
                 [System.Environment]::SetEnvironmentVariable($key, $settings[$key], 'Process')
             }
             try {
+                & $go.Source run ./cmd/sourcecheck
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Host 'FAILED: source architecture check'
+                    $failed = $true
+                } else {
+                    Write-Host 'PASSED: selected source architecture checks'
+                    Write-Host 'UNRUN: complete architecture and instrumentation review'
+                }
                 foreach ($command in @(@('vet', './...'), @('test', './...'), @('test', '-race', './...'))) {
                     & $go.Source @command
                     if ($LASTEXITCODE -ne 0) {
@@ -76,7 +86,7 @@ try {
             }
         }
     }
-    Write-Host 'UNRUN: native Windows package, final media and target-machine qualification'
+    Write-Host 'UNRUN: native Windows package, reproducibility, lifecycle, final media, specialist review and complete-game qualification'
 } finally {
     Pop-Location
 }

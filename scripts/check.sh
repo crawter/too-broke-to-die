@@ -20,14 +20,14 @@ if [ -f build/.intake-pending.json ]; then
 fi
 if ! command -v go >/dev/null 2>&1; then
     echo "BLOCKED: Go source checks require a local Go toolchain"
-    echo "UNRUN: native Windows package and target-machine qualification"
+    echo "UNRUN: native Windows package, reproducibility, lifecycle, final media, specialist review and complete-game qualification"
     exit 0
 fi
 
 files=$(find . \( -name .git -o -name vendor -o -name '.intake-*' \) -prune -o -name '*.go' -type f -print)
 if [ -z "$files" ]; then
-    echo "UNRUN: Go formatting, vet, tests and race tests; no Go source exists"
-    echo "UNRUN: native Windows package and target-machine qualification"
+    echo "UNRUN: Go source architecture, formatting, vet, tests and race tests; no Go source exists"
+    echo "UNRUN: native Windows package, reproducibility, lifecycle, final media, specialist review and complete-game qualification"
     exit 0
 fi
 
@@ -48,10 +48,18 @@ else
     echo "BLOCKED: gofmt is unavailable"
 fi
 
- if [ ! -f vendor/modules.txt ] || [ -f build/.intake-pending.json ]; then
-    echo "BLOCKED: vet, tests and race tests require completed dependency intake"
+if [ ! -f vendor/modules.txt ] || [ ! -f go.sum ] || \
+    [ ! -f build/toolchain-lock.json ] || [ -f build/.intake-pending.json ]; then
+    echo "BLOCKED: source architecture check, vet, tests and race tests require completed dependency intake"
 else
-    export GOTOOLCHAIN=local GOWORK=off GOPROXY=off GOSUMDB=off GOFLAGS=-mod=vendor
+    export GOTOOLCHAIN=local GOWORK=off GOENV=off GOPROXY=off GOSUMDB=off GOFLAGS=-mod=vendor
+    if go run ./cmd/sourcecheck; then
+        echo "PASSED: selected source architecture checks"
+        echo "UNRUN: complete architecture and instrumentation review"
+    else
+        echo "FAILED: source architecture check"
+        failed=1
+    fi
     for check in vet test race; do
         case "$check" in
             vet) go vet ./... ;;
@@ -68,5 +76,5 @@ else
     done
 fi
 
-echo "UNRUN: native Windows package, final media and target-machine qualification"
+echo "UNRUN: native Windows package, reproducibility, lifecycle, final media, specialist review and complete-game qualification"
 exit "$failed"
