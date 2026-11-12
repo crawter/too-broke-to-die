@@ -1,0 +1,33 @@
+{
+  "schema_version":1,"location":"LOC-HOS",
+  "exit_gate":"G-CHU-IN","exit_location":"LOC-CHU",
+  "links":[
+    {"from":"ENC-HOS-01","to":"ENC-HOS-02","exit":{"x":1501,"y":0},"entry":{"x":35,"y":0}},
+    {"from":"ENC-HOS-02","to":"ENC-HOS-03","exit":{"x":1501,"y":0},"entry":{"x":35,"y":0}},
+    {"from":"ENC-HOS-03","to":"ENC-HOS-04","exit":{"x":1501,"y":0},"entry":{"x":35,"y":0}},
+    {"from":"ENC-HOS-04","to":"ENC-HOS-05","exit":{"x":1501,"y":0},"entry":{"x":-120,"y":0}}
+  ],
+  "bays":[
+    {"encounter":"ENC-HOS-01","anchor":"ANC-HOS-01","emergency":"EM-HOS-SUP","family":"SUP","hazard":"steam","aftermath_blocking":true,"danger":{"x":1100,"y":0,"width":40,"height":128},"aftermath":{"x":1100,"y":0,"width":40,"height":128},"space":{"kind":"area","refuge_name":"BYPASS-ENTRY","refuge":{"x":1240,"y":0,"width":48,"height":96},"envelope":{"x":1100,"y":0,"width":40,"height":128},"barrier":{"x":1140,"y":0,"width":8,"height":128}}},
+    {"encounter":"ENC-HOS-02","anchor":"ANC-HOS-02","emergency":"EM-HOS-RES","family":"RES","hazard":"beds","danger":{"x":1140,"y":0,"width":40,"height":58},"aftermath":{"x":1140,"y":0,"width":40,"height":58},"space":{"kind":"wave","refuge_name":"SIDE-REFUGE","refuge":{"x":1260,"y":0,"width":48,"height":96},"envelope":{"x":1140,"y":0,"width":92,"height":58},"barrier":{"x":1232,"y":0,"width":8,"height":96},"start":{"x":1140,"y":0,"width":40,"height":58},"end":{"x":1192,"y":0,"width":40,"height":58},"speed":220}},
+    {"encounter":"ENC-HOS-03","anchor":"ANC-HOS-03","emergency":"EM-HOS-UTL","family":"UTL","hazard":"pressure","aftermath_blocking":true,"danger":{"x":1100,"y":0,"width":40,"height":120},"aftermath":{"x":1100,"y":0,"width":40,"height":120},"space":{"kind":"area","refuge_name":"MANUAL-BYPASS","refuge":{"x":1248,"y":0,"width":48,"height":96},"envelope":{"x":1100,"y":0,"width":40,"height":120},"barrier":{"x":1140,"y":0,"width":8,"height":120}}},
+    {"encounter":"ENC-HOS-04","anchor":"ANC-HOS-04","emergency":"EM-HOS-PRV","family":"PRV","hazard":"fire","danger":{"x":1160,"y":0,"width":40,"height":120},"aftermath":{"x":1160,"y":0,"width":40,"height":120},"space":{"kind":"area","refuge_name":"FIRE-SHUTTER","refuge":{"x":1248,"y":0,"width":48,"height":96},"envelope":{"x":1160,"y":0,"width":40,"height":120},"barrier":{"x":1200,"y":0,"width":8,"height":120}}}
+  ],
+  "prologue":[
+    {"encounter":"ENC-PRO-01","anchor":"ANC-PRO-01","action":"DONATION","bounds":{"x":0,"y":-8,"width":640,"height":568},"floor":{"x":0,"y":-8,"width":640,"height":8},"entry":{"x":16,"y":0},"spawn":{"x":32,"y":0},"objective":{"x":340,"y":160},
+      "platforms":[{"x":80,"y":72,"width":128,"height":8},{"x":240,"y":152,"width":160,"height":8}],
+      "jumps":[{"support":-1,"target":0,"jump":{"id":"PRO-ANNEX-1","takeoff_x":35,"speed":200,"landing":"PLATFORM-0","camera":{"x":0,"y":-160,"width":1280,"height":720},"occluders":[]}},{"support":0,"target":1,"jump":{"id":"PRO-ANNEX-2","takeoff_x":160,"speed":200,"landing":"PLATFORM-1","camera":{"x":0,"y":-160,"width":1280,"height":720},"occluders":[]}}],
+      "features":[{"id":"DONATION-BOX","x":340,"y":160,"width":32,"height":48}],"solids":[],"lethal":[]},
+    {"encounter":"ENC-PRO-02","anchor":"ANC-PRO-02","action":"HEART-ATTACK","bounds":{"x":0,"y":-8,"width":640,"height":568},"floor":{"x":0,"y":-8,"width":640,"height":8},"entry":{"x":16,"y":0},"spawn":{"x":336,"y":0},"objective":{"x":336,"y":0},"platforms":[],"jumps":[],"features":[],"solids":[],"lethal":[]}
+  ],
+  "boss":{"encounter":"ENC-HOS-05","anchor":"ANC-HOS-05","out_anchor":"ANC-HOS-OUT","closure":"D-HOS-END","terminal":"OBJ-HOS-END-TERMINAL",
+    "bounds":{"x":-240,"y":-8,"width":1760,"height":568},"floor":{"x":-240,"y":-8,"width":1760,"height":8},
+    "checkpoint":{"x":-120,"y":0},"refills":[{"x":64,"y":0},{"x":1216,"y":0}],"exit":{"x":1400,"y":0},"terminal_position":{"x":1320,"y":0},
+    "platforms":[{"x":320,"y":72,"width":160,"height":8},{"x":880,"y":72,"width":160,"height":8}],
+    "protection":[{"x":-176,"y":0,"width":112,"height":100},{"x":16,"y":0,"width":96,"height":100},{"x":1168,"y":0,"width":96,"height":100}],
+    "features":[{"id":"CONVEYOR-L","x":240,"y":0,"width":240,"height":8},{"id":"CONVEYOR-R","x":800,"y":0,"width":240,"height":8},{"id":"EXTRACTION-RIG","x":600,"y":0,"width":80,"height":180}],
+    "jumps":[
+      {"support":-1,"target":0,"jump":{"id":"HOS-LEFT","takeoff_x":240,"speed":200,"landing":"PLATFORM-0","camera":{"x":0,"y":-160,"width":1280,"height":720},"occluders":[]}},
+      {"support":-1,"target":1,"jump":{"id":"HOS-RIGHT","takeoff_x":800,"speed":200,"landing":"PLATFORM-1","camera":{"x":0,"y":-160,"width":1280,"height":720},"occluders":[]}}
+    ],"solids":[],"lethal":[]}
+}

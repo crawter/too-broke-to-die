@@ -1,0 +1,29 @@
+{
+  "schema_version":1,"location":"LOC-MIN",
+  "exit_gate":"G-INS-IN","exit_location":"LOC-INS",
+  "links":[
+    {"from":"ENC-MIN-01","to":"ENC-MIN-02","exit":{"x":1501,"y":0},"entry":{"x":35,"y":0}},
+    {"from":"ENC-MIN-02","to":"ENC-MIN-03","exit":{"x":1501,"y":0},"entry":{"x":35,"y":0}},
+    {"from":"ENC-MIN-03","to":"ENC-MIN-04","exit":{"x":1501,"y":0},"entry":{"x":35,"y":0}},
+    {"from":"ENC-MIN-04","to":"ENC-MIN-05","exit":{"x":1501,"y":0},"entry":{"x":-120,"y":0}}
+  ],
+  "return_lobbies":[{"anchor":"ANC-MIN-PERMIT","bounds":{"x":0,"y":-8,"width":640,"height":568},"floor":{"x":0,"y":-8,"width":640,"height":8},"protection":{"x":0,"y":0,"width":640,"height":120},"entry":{"x":32,"y":0},"spawn":{"x":320,"y":0},"counter":{"x":352,"y":0},"solids":[],"lethal":[]}],
+  "bays":[
+    {"encounter":"ENC-MIN-01","anchor":"ANC-MIN-01","emergency":"EM-MIN-SUP","family":"SUP","hazard":"paperwork","danger":{"x":1140,"y":0,"width":32,"height":58},"aftermath":{"x":1140,"y":0,"width":32,"height":58},"space":{"kind":"wave","refuge_name":"PAPER-ALCOVE","refuge":{"x":1256,"y":0,"width":48,"height":96},"envelope":{"x":1140,"y":0,"width":92,"height":58},"barrier":{"x":1232,"y":0,"width":8,"height":96},"start":{"x":1140,"y":0,"width":32,"height":58},"end":{"x":1200,"y":0,"width":32,"height":58},"speed":220}},
+    {"encounter":"ENC-MIN-02","anchor":"ANC-MIN-02","emergency":"EM-MIN-RES","family":"RES","hazard":"desks","danger":{"x":1180,"y":0,"width":40,"height":58},"aftermath":{"x":1180,"y":0,"width":40,"height":58},"space":{"kind":"wave","refuge_name":"DESK-BYPASS","refuge":{"x":1260,"y":0,"width":48,"height":96},"envelope":{"x":1180,"y":0,"width":52,"height":58},"barrier":{"x":1232,"y":0,"width":8,"height":96},"start":{"x":1180,"y":0,"width":40,"height":58},"end":{"x":1192,"y":0,"width":40,"height":58},"speed":220}},
+    {"encounter":"ENC-MIN-03","anchor":"ANC-MIN-03","emergency":"EM-MIN-UTL","family":"UTL","hazard":"waste","aftermath_blocking":true,"danger":{"x":1140,"y":0,"width":40,"height":100},"aftermath":{"x":1140,"y":0,"width":40,"height":100},"space":{"kind":"area","refuge_name":"DRY-BYPASS","refuge":{"x":1248,"y":0,"width":48,"height":96},"envelope":{"x":1140,"y":0,"width":40,"height":100},"barrier":{"x":1180,"y":0,"width":8,"height":100}}},
+    {"encounter":"ENC-MIN-04","anchor":"ANC-MIN-04","emergency":"EM-MIN-PRV","family":"PRV","hazard":"samples","danger":{"x":1200,"y":0,"width":32,"height":58},"aftermath":{"x":1200,"y":0,"width":32,"height":58},"space":{"kind":"area","refuge_name":"SAMPLE-CABINET","refuge":{"x":1256,"y":0,"width":48,"height":96},"envelope":{"x":1200,"y":0,"width":32,"height":58},"barrier":{"x":1232,"y":0,"width":8,"height":96}}}
+  ],
+  "boss":{"encounter":"ENC-MIN-05","anchor":"ANC-MIN-05","out_anchor":"ANC-MIN-OUT","closure":"D-MIN-END","terminal":"OBJ-MIN-END-TERMINAL",
+    "bounds":{"x":-240,"y":-8,"width":1760,"height":568},"floor":{"x":-240,"y":-8,"width":1760,"height":8},
+    "checkpoint":{"x":-120,"y":0},"refills":[{"x":64,"y":160},{"x":1216,"y":160}],"exit":{"x":1400,"y":0},"terminal_position":{"x":1320,"y":0},
+    "platforms":[{"x":-160,"y":72,"width":160,"height":8},{"x":0,"y":152,"width":1280,"height":8},{"x":1280,"y":72,"width":160,"height":8}],
+    "protection":[{"x":-176,"y":0,"width":112,"height":100},{"x":16,"y":160,"width":96,"height":100},{"x":1168,"y":160,"width":96,"height":100}],
+    "features":[{"id":"SUMP","x":0,"y":0,"width":1280,"height":120},{"id":"GANTRY","x":0,"y":152,"width":1280,"height":8},{"id":"LIFT","x":600,"y":160,"width":80,"height":120}],
+    "jumps":[
+      {"support":-1,"target":0,"jump":{"id":"MIN-STEP","takeoff_x":-215,"speed":160,"landing":"PLATFORM-0","camera":{"x":-240,"y":-160,"width":1280,"height":720},"occluders":[]}},
+      {"support":0,"target":1,"jump":{"id":"MIN-GANTRY","takeoff_x":-80,"speed":200,"landing":"PLATFORM-1","camera":{"x":-240,"y":-160,"width":1280,"height":720},"occluders":[]}},
+      {"support":-1,"target":2,"jump":{"id":"MIN-RIGHT-STEP","direction":-1,"takeoff_x":1495,"speed":160,"landing":"PLATFORM-2","camera":{"x":240,"y":-160,"width":1280,"height":720},"occluders":[]}},
+      {"support":2,"target":1,"jump":{"id":"MIN-RIGHT-GANTRY","direction":-1,"takeoff_x":1360,"speed":200,"landing":"PLATFORM-1","camera":{"x":240,"y":-160,"width":1280,"height":720},"occluders":[]}}
+    ],"solids":[],"lethal":[]}
+}
