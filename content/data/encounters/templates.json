@@ -5,23 +5,58 @@
     {"role":"CONSOLE","x":176,"y":0},
     {"role":"REFILL","x":208,"y":0}
   ],
+  "safety": {
+    "refuge":{"x":1416,"y":0},
+    "vestibule_protection":{"x":0,"y":0,"width":240,"height":120},
+    "refuge_protection":{"x":1380,"y":0,"width":72,"height":120},
+    "platforms":[
+      {"x":80,"y":72,"width":128,"height":8}, {"x":240,"y":152,"width":128,"height":8},
+      {"x":400,"y":232,"width":736,"height":8}, {"x":1168,"y":152,"width":128,"height":8},
+      {"x":1328,"y":72,"width":128,"height":8}
+    ],
+    "jumps":[
+      {"support":-1,"target":0,"jump":{"id":"BYPASS-L1","takeoff_x":35,"speed":200,"landing":"BYPASS-0","camera":{"x":0,"y":-160,"width":1280,"height":720},"occluders":[]}},
+      {"support":0,"target":1,"jump":{"id":"BYPASS-L2","takeoff_x":160,"speed":200,"landing":"BYPASS-1","camera":{"x":0,"y":-160,"width":1280,"height":720},"occluders":[]}},
+      {"support":1,"target":2,"jump":{"id":"BYPASS-L3","takeoff_x":320,"speed":200,"landing":"BYPASS-2","camera":{"x":0,"y":-160,"width":1280,"height":720},"occluders":[]}},
+      {"support":-1,"target":4,"jump":{"id":"BYPASS-R1","direction":-1,"takeoff_x":1501,"speed":200,"landing":"BYPASS-4","camera":{"x":256,"y":-160,"width":1280,"height":720},"occluders":[]}},
+      {"support":4,"target":3,"jump":{"id":"BYPASS-R2","direction":-1,"takeoff_x":1376,"speed":200,"landing":"BYPASS-3","camera":{"x":256,"y":-160,"width":1280,"height":720},"occluders":[]}},
+      {"support":3,"target":2,"jump":{"id":"BYPASS-R3","direction":-1,"takeoff_x":1216,"speed":200,"landing":"BYPASS-2","camera":{"x":256,"y":-160,"width":1280,"height":720},"occluders":[]}}
+    ],
+    "states":[
+      {"name":"normal","solids":[],"lethal":[]},
+      {"name":"emergency","solids":[],"lethal":[]},
+      {"name":"aftermath","solids":[],"lethal":[]}
+    ]
+  },
   "templates": [
-    {"id":"BAY-SUP","width":1536,"height":560,"floor":{"x":0,"y":-8,"width":1536,"height":8},"jumps":[],"objects":[
+    {"id":"BAY-SUP","width":1536,"height":560,"floor":{"x":0,"y":-8,"width":1536,"height":8},
+      "terrain":[{"id":"CATWALK","kind":"player_platform","bounds":{"x":560,"y":72,"width":416,"height":8}},{"id":"CRUSHER","kind":"crusher","bounds":{"x":720,"y":0,"width":96,"height":160}}],
+      "passages":[{"id":"SIDE-PASSAGE","bounds":{"x":560,"y":0,"width":416,"height":58}}],"jumps":[{"id":"JUMP-SUP-LEDGE","takeoff_x":480,"speed":200,"landing":"CATWALK","camera":{"x":0,"y":-160,"width":1280,"height":720},"occluders":[]}],"objects":[
       {"role":"TROLLEY","x":320,"y":0},{"role":"PAD","x":1320,"y":0},{"role":"TERMINAL","x":1344,"y":0},{"role":"CRUSHER","x":720,"y":0}
     ],"features":[
-      {"id":"CRUSHER","x":720,"y":0,"width":96,"height":160},{"id":"CATWALK","x":560,"y":80,"width":416,"height":8}
+      {"id":"CRUSHER","x":720,"y":0,"width":96,"height":160},{"id":"CATWALK","x":560,"y":80,"width":416,"height":8},
+      {"id":"CRUSHER-CONTROL-L","x":656,"y":0,"width":32,"height":16},{"id":"CRUSHER-CONTROL-R","x":832,"y":0,"width":32,"height":16},{"id":"SIDE-PASSAGE","x":560,"y":0,"width":416,"height":58}
     ]},
-    {"id":"BAY-RES","width":1536,"height":560,"floor":{"x":0,"y":-8,"width":1536,"height":8},"jumps":[],"objects":[
+    {"id":"BAY-RES","width":1536,"height":560,"floor":{"x":0,"y":-8,"width":1536,"height":8},
+      "terrain":[{"id":"GATE","kind":"gate","bounds":{"x":672,"y":0,"width":16,"height":128}}],
+      "passages":[{"id":"RESCUE-ROUTE","bounds":{"x":240,"y":0,"width":1296,"height":58}}],"jumps":[],"objects":[
       {"role":"ACTOR","x":800,"y":0},{"role":"PLATE","x":432,"y":0},{"role":"CRATE","x":352,"y":0},{"role":"GATE","x":672,"y":0},{"role":"LATCH","x":736,"y":0},{"role":"REFUGE","x":1312,"y":0},{"role":"TERMINAL","x":1344,"y":0}
     ],"features":[]},
-    {"id":"BAY-UTL","width":1536,"height":560,"floor":{"x":0,"y":-8,"width":1536,"height":8},"jumps":[
-      {"id":"JUMP-UTL-LEDGE","takeoff_x":400,"speed":320,"landing":"STEP-1","camera":{"x":0,"y":-160,"width":1280,"height":720},"occluders":[]}
+    {"id":"BAY-UTL","width":1536,"height":560,"floor":{"x":0,"y":-8,"width":1536,"height":8},
+      "terrain":[{"id":"STEP-1","kind":"one_way","bounds":{"x":480,"y":72,"width":128,"height":8}},{"id":"STEP-2","kind":"one_way","bounds":{"x":608,"y":72,"width":32,"height":8}},{"id":"RETURN-LOW","kind":"one_way","bounds":{"x":720,"y":32,"width":80,"height":8}},{"id":"RETURN-HIGH","kind":"one_way","bounds":{"x":640,"y":72,"width":80,"height":8}},{"id":"OPENING","kind":"player_only","bounds":{"x":640,"y":80,"width":28,"height":96}},{"id":"PADDLE","kind":"projectile_target","bounds":{"x":788,"y":88,"width":64,"height":64}}],
+      "passages":[{"id":"RETURN-PASSAGE","bounds":{"x":240,"y":0,"width":1296,"height":58}}],"jumps":[
+      {"id":"JUMP-UTL-LEDGE","takeoff_x":400,"speed":320,"landing":"STEP-1","camera":{"x":0,"y":-160,"width":1280,"height":720},"occluders":[]},
+      {"id":"JUMP-UTL-RETURN-LOW","direction":-1,"takeoff_x":830,"speed":140,"landing":"RETURN-LOW","camera":{"x":0,"y":-160,"width":1280,"height":720},"occluders":[]},
+      {"id":"JUMP-UTL-RETURN-HIGH","direction":-1,"support":"RETURN-LOW","takeoff_x":770,"speed":140,"landing":"RETURN-HIGH","camera":{"x":0,"y":-160,"width":1280,"height":720},"occluders":[]}
     ],"objects":[
       {"role":"PADDLE","x":820,"y":120},{"role":"SWITCH","x":960,"y":0},{"role":"FUSE","x":1024,"y":0},{"role":"TERMINAL","x":1344,"y":0}
     ],"features":[
-      {"id":"STEP-1","x":480,"y":80,"width":128,"height":8},{"id":"STEP-2","x":608,"y":80,"width":32,"height":8},{"id":"OPENING","x":640,"y":80,"width":28,"height":96},{"id":"PADDLE","x":788,"y":88,"width":64,"height":64}
+      {"id":"STEP-1","x":480,"y":80,"width":128,"height":8},{"id":"STEP-2","x":608,"y":80,"width":32,"height":8},{"id":"OPENING","x":640,"y":80,"width":28,"height":96},{"id":"PADDLE","x":788,"y":88,"width":64,"height":64},
+      {"id":"RETURN-LOW","x":720,"y":40,"width":80,"height":8},{"id":"RETURN-HIGH","x":640,"y":80,"width":80,"height":8}
     ]},
-    {"id":"BAY-PRV","width":1536,"height":560,"floor":{"x":0,"y":-8,"width":1536,"height":8},"jumps":[
+    {"id":"BAY-PRV","width":1536,"height":560,"floor":{"x":0,"y":-8,"width":1536,"height":8},
+      "terrain":[{"id":"LEDGE","kind":"one_way","bounds":{"x":608,"y":72,"width":32,"height":8}},{"id":"CAMERA","kind":"projectile_target","bounds":{"x":768,"y":88,"width":64,"height":64}}],
+      "passages":[{"id":"UNDER-LEDGE","bounds":{"x":240,"y":0,"width":1296,"height":58}}],"jumps":[
       {"id":"JUMP-PRV-LEDGE","takeoff_x":480,"speed":260,"landing":"LEDGE","camera":{"x":0,"y":-160,"width":1280,"height":720},"occluders":[]}
     ],"objects":[
       {"role":"RECORDER","x":384,"y":0},{"role":"CAMERA","x":800,"y":120},{"role":"TERMINAL","x":1344,"y":0}

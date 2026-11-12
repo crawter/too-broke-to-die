@@ -2,9 +2,9 @@
   "schema_version": 1,
   "variants": [
     {"number":1,"enemies":[{"kind":"MELEE","x":960}],"stations":[760],"mode":"single","tutorial":true},
-    {"number":2,"enemies":[{"kind":"RANGED","x":1040}],"stations":[760],"mode":"single","cover_x":880},
+    {"number":2,"enemies":[{"kind":"RANGED","x":1040}],"stations":[760],"mode":"single","cover_x":880,"cover_kind":"player_projectile","cover":{"x":880,"y":0,"width":32,"height":64}},
     {"number":3,"enemies":[{"kind":"MELEE","x":880},{"kind":"MELEE","x":1120}],"stations":[760],"mode":"single"},
-    {"number":4,"enemies":[{"kind":"MELEE","x":880},{"kind":"RANGED","x":1120}],"stations":[680,1040],"mode":"single","waiting_alcove":true},
+    {"number":4,"enemies":[{"kind":"MELEE","x":880},{"kind":"RANGED","x":1120}],"stations":[680,1040],"mode":"single","waiting_alcove":true,"alcove":{"x":848,"y":0,"width":160,"height":80}},
     {"number":5,"enemies":[{"kind":"MELEE","x":880},{"kind":"MELEE","x":1120}],"stations":[680,1040],"mode":"alternating"},
     {"number":6,"enemies":[{"kind":"MELEE","x":880},{"kind":"RANGED","x":1120}],"stations":[680,1040],"mode":"simultaneous"}
   ]

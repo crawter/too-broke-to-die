@@ -1,0 +1,28 @@
+{
+  "schema_version":1,"location":"LOC-INS",
+  "exit_gate":"G-PERMIT","exit_location":"LOC-MIN",
+  "links":[
+    {"from":"ENC-INS-01","to":"ENC-INS-02","exit":{"x":1501,"y":0},"entry":{"x":35,"y":0}},
+    {"from":"ENC-INS-02","to":"ENC-INS-03","exit":{"x":1501,"y":0},"entry":{"x":35,"y":0}},
+    {"from":"ENC-INS-03","to":"ENC-INS-04","exit":{"x":1501,"y":0},"entry":{"x":35,"y":0}},
+    {"from":"ENC-INS-04","to":"ENC-INS-05","exit":{"x":1501,"y":0},"entry":{"x":-120,"y":0}}
+  ],
+  "bays":[
+    {"encounter":"ENC-INS-01","anchor":"ANC-INS-01","emergency":"EM-INS-SUP","family":"SUP","hazard":"boxes","danger":{"x":1160,"y":0,"width":32,"height":58},"aftermath":{"x":1160,"y":0,"width":32,"height":58},"space":{"kind":"wave","refuge_name":"REST-ROOM","refuge":{"x":1252,"y":0,"width":48,"height":96},"envelope":{"x":1160,"y":0,"width":72,"height":58},"barrier":{"x":1232,"y":0,"width":8,"height":96},"start":{"x":1160,"y":0,"width":32,"height":58},"end":{"x":1200,"y":0,"width":32,"height":58},"speed":220}},
+    {"encounter":"ENC-INS-02","anchor":"ANC-INS-02","emergency":"EM-INS-RES","family":"RES","hazard":"arch","aftermath_blocking":true,"danger":{"x":1200,"y":0,"width":40,"height":160},"aftermath":{"x":1200,"y":0,"width":40,"height":58},"space":{"kind":"fall","refuge_name":"SEPARATE-EXIT","refuge":{"x":1260,"y":0,"width":48,"height":96},"envelope":{"x":1200,"y":0,"width":40,"height":160},"barrier":{"x":1240,"y":0,"width":8,"height":96}}},
+    {"encounter":"ENC-INS-03","anchor":"ANC-INS-03","emergency":"EM-INS-UTL","family":"UTL","hazard":"lighting","danger":{"x":1160,"y":0,"width":32,"height":100},"aftermath":{"x":1160,"y":0,"width":32,"height":100},"space":{"kind":"area","refuge_name":"ISOLATED-RAMP","refuge":{"x":1252,"y":0,"width":48,"height":96},"envelope":{"x":1160,"y":0,"width":32,"height":100},"barrier":{"x":1192,"y":0,"width":8,"height":100}}},
+    {"encounter":"ENC-INS-04","anchor":"ANC-INS-04","emergency":"EM-INS-PRV","family":"PRV","hazard":"cables","danger":{"x":1220,"y":0,"width":32,"height":100},"aftermath":{"x":1220,"y":0,"width":32,"height":100},"space":{"kind":"area","refuge_name":"CABLE-SHELTER","refuge":{"x":1260,"y":0,"width":48,"height":96},"envelope":{"x":1220,"y":0,"width":32,"height":100},"barrier":{"x":1252,"y":0,"width":8,"height":100}}}
+  ],
+  "boss":{"encounter":"ENC-INS-05","anchor":"ANC-INS-05","out_anchor":"ANC-INS-OUT","closure":"D-INS-END","terminal":"OBJ-INS-END-TERMINAL",
+    "bounds":{"x":-240,"y":-8,"width":1760,"height":568},"floor":{"x":-240,"y":-8,"width":1760,"height":8},
+    "checkpoint":{"x":-120,"y":0},"refills":[{"x":64,"y":0},{"x":1216,"y":0}],"exit":{"x":1400,"y":0},"terminal_position":{"x":1320,"y":0},
+    "platforms":[{"x":240,"y":72,"width":160,"height":8},{"x":320,"y":152,"width":160,"height":8},{"x":800,"y":72,"width":160,"height":8},{"x":880,"y":152,"width":160,"height":8}],
+    "protection":[{"x":-176,"y":0,"width":112,"height":100},{"x":16,"y":0,"width":96,"height":100},{"x":1168,"y":0,"width":96,"height":100}],
+    "features":[{"id":"RELAY-A","x":288,"y":0,"width":64,"height":80},{"id":"RELAY-B","x":928,"y":0,"width":64,"height":80},{"id":"BROADCAST-CAGE","x":600,"y":0,"width":80,"height":160}],
+    "jumps":[
+      {"support":-1,"target":0,"jump":{"id":"INS-LEFT-1","takeoff_x":160,"speed":200,"landing":"PLATFORM-0","camera":{"x":0,"y":-160,"width":1280,"height":720},"occluders":[]}},
+      {"support":0,"target":1,"jump":{"id":"INS-LEFT-2","takeoff_x":272,"speed":160,"landing":"PLATFORM-1","camera":{"x":0,"y":-160,"width":1280,"height":720},"occluders":[]}},
+      {"support":-1,"target":2,"jump":{"id":"INS-RIGHT-1","takeoff_x":720,"speed":200,"landing":"PLATFORM-2","camera":{"x":0,"y":-160,"width":1280,"height":720},"occluders":[]}},
+      {"support":2,"target":3,"jump":{"id":"INS-RIGHT-2","takeoff_x":832,"speed":160,"landing":"PLATFORM-3","camera":{"x":0,"y":-160,"width":1280,"height":720},"occluders":[]}}
+    ],"solids":[],"lethal":[]}
+}
