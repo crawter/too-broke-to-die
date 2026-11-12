@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "content_version": "campaign-1",
+  "families": [
+    {"id":"SUP","title":"Доставить помощь","evidence":"Push the sealed trolley onto its receiving pad with its seal intact.","trigger":"Hold the receiving terminal while the trolley occupies the pad.","failure":"A marked crusher breaks the trolley seal.","reset":"Restore the ticket trolley and seal.","ticket_roles":["TROLLEY"],"shared_roles":["PAD","TERMINAL","CRUSHER"]},
+    {"id":"RES","title":"Освободить человека","evidence":"Weight the plate with a crate or settled limb, latch the gate, and guide the named adult across the refuge line.","trigger":"Hold the refuge terminal after the adult crosses the line.","failure":"A hazard hits the adult before refuge.","reset":"Restore the same adult, gate and props.","ticket_roles":["ACTOR"],"shared_roles":["PLATE","CRATE","GATE","LATCH","REFUGE","TERMINAL"]},
+    {"id":"UTL","title":"Восстановить подачу","evidence":"Throw a detached limb into the selected paddle and close the bypass switch.","trigger":"Hold the output meter while its reading is stable.","failure":"Closing the bypass before the paddle latches trips the fuse.","reset":"Restore the paddle, bypass and fuse.","ticket_roles":["PADDLE"],"shared_roles":["SWITCH","FUSE","TERMINAL"]},
+    {"id":"PRV","title":"Закрыть слежку","evidence":"Start the ticket recorder and hit its marked camera receptor with feces.","trigger":"Hold the public terminal while the recorder shows camera interruption.","failure":"Fouling the camera before starting the recorder.","reset":"Clean the active receptor and restore its recorder.","ticket_roles":["RECORDER","CAMERA"],"shared_roles":["TERMINAL"]}
+  ],
+  "institutions": [
+    {"id":"HOS","closure":"D-HOS-END","action":"Use Nina's audit terminal to certify the stopped extraction drive and manual ward bypass.","outcome":"Record obsolete-equipment removal, damaged services, NAR-05 completion and church access.","milestone":"NAR-05","batches":[
+      {"family":"SUP","emergency":"EM-HOS-SUP","aftermath":"The receiving service adds a handling fee to the named consignment.","hazard":"Overloaded freight junction ruptures a steam pipe.","recovery":"Overhead bypass remains open; steaming pipe behind a barrier."},
+      {"family":"RES","emergency":"EM-HOS-RES","aftermath":"The freed adult receives a compulsory donor-screening appointment.","hazard":"The queue gate releases a wave of empty beds.","recovery":"Marked side refuge; wrecked beds remain decorative."},
+      {"family":"UTL","emergency":"EM-HOS-UTL","aftermath":"Restored output also powers the circuit's extraction equipment.","hazard":"Pressure gauge reaches red and extraction manifold bursts.","recovery":"Manual bypass preserves service; Nina appears by the manifold."},
+      {"family":"PRV","emergency":"EM-HOS-PRV","aftermath":"The interrupted camera is labelled a future replacement expense.","hazard":"A sparking monitoring rack catches fire.","recovery":"Fire shutters protect the vestibule; burnt screens display a replacement appeal."}
+    ]},
+    {"id":"CHU","closure":"D-CHU-END","action":"Use the archive kiosk to authenticate the charity report and certify confession-channel interruption.","outcome":"Record public confession exposure, paid scandal access and ministry access.","batches":[
+      {"family":"SUP","emergency":"EM-CHU-SUP","aftermath":"The recipient signs a compulsory donation promise.","hazard":"A strained donation conveyor spills burning promotional candles.","recovery":"Side gallery remains clear; wax and broken tins remain."},
+      {"family":"RES","emergency":"EM-CHU-RES","aftermath":"The freed adult receives an emergency-forgiveness invoice.","hazard":"The queue spills through a failing sponsored turnstile.","recovery":"Adults retreat safely; broken turnstile causes a bounded collision."},
+      {"family":"UTL","emergency":"EM-CHU-UTL","aftermath":"Restored output powers a matching sponsored confession channel.","hazard":"Ringing overload tears the donation bell from its mount.","recovery":"Marked shelter avoids the drop; bell becomes a fundraising exhibit."},
+      {"family":"PRV","emergency":"EM-CHU-PRV","aftermath":"A backup service stores the camera's audience list.","hazard":"A server fault projects private confession headings across the nave.","recovery":"Hot exhaust stays confined; church advertises paid scandal access."}
+    ]},
+    {"id":"MIN","closure":"D-MIN-END","action":"Use Vera's review terminal to validate the sanitation report and institute referral.","outcome":"Record the waste emergency, Blagoev's successful-exercise claim and institute access.","batches":[
+      {"family":"SUP","emergency":"EM-MIN-SUP","aftermath":"The receiving office reclassifies the consignment as unpaid labor.","hazard":"A jammed form press ejects bundled paperwork.","recovery":"Fixed alcove avoids the wave; the report calls it faster processing."},
+      {"family":"RES","emergency":"EM-MIN-RES","aftermath":"The freed adult receives a new compulsory-work assignment.","hazard":"The work counter pulls desks into the corridor.","recovery":"Bypass avoids the wave; workers return to separate desks."},
+      {"family":"UTL","emergency":"EM-MIN-UTL","aftermath":"The restored circuit increases matching surveillance or tax output.","hazard":"Waste gauge reaches red and discharges into the working lane.","recovery":"Dry overhead bypass remains; barrier marks contaminated floor."},
+      {"family":"PRV","emergency":"EM-MIN-PRV","aftermath":"Officials retain the record under a different inspection category.","hazard":"The inspection archive ejects stored waste samples.","recovery":"Marked cabinet provides cover; file calls spill an audit success."}
+    ]},
+    {"id":"INS","closure":"D-INS-END","action":"Hold the public-address panel for 1.5 seconds to restore the civic line and certify broadcast interruption.","outcome":"Record backup advertising, the hundredth receipt, NAR-09 completion and return transport.","milestone":"NAR-09","batches":[
+      {"family":"SUP","emergency":"EM-INS-SUP","aftermath":"The institute counts the consignment's recipient as a converted lead.","hazard":"An overloaded promotional chute fires boxes across the studio floor.","recovery":"Rest-room passage remains clear; a new sales graphic counts the boxes."},
+      {"family":"RES","emergency":"EM-INS-RES","aftermath":"The freed adult receives a follow-up coaching subscription offer.","hazard":"A strained recruitment arch collapses into the empty waiting lane.","recovery":"Adults remain in refuge; a separate exit stays open."},
+      {"family":"UTL","emergency":"EM-INS-UTL","aftermath":"Restored output also powers a matching trend distributor.","hazard":"Studio meter reaches red and shorts the lighting grid.","recovery":"Floor isolation keeps the return ramp safe; replacement advertisements remain lit."},
+      {"family":"PRV","emergency":"EM-INS-PRV","aftermath":"The institute sells a replacement audience segment for the record.","hazard":"The tracking rack floods the room with competing trend projections.","recovery":"Cable arcs occupy marked lanes only; institute reports record attention."}
+    ]}
+  ]
+}
