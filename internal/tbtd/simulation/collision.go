@@ -140,6 +140,22 @@ type MoveResult struct {
 	Bounds     Rect
 	Contacts   []Impact
 	Diagnostic string
+	segments   []movementSegment
+}
+
+// movementSegment records one actual, unobstructed portion of a swept move.
+// Trial moves are retained only if the caller commits the MoveResult.
+type movementSegment struct {
+	from Rect
+	to   Rect
+}
+
+func (result *MoveResult) travel(delta Vector) {
+	before := result.Bounds
+	result.Bounds = moved(before, delta)
+	if result.Bounds != before {
+		result.segments = append(result.segments, movementSegment{from: before, to: result.Bounds})
+	}
 }
 
 // separateTolerance corrects only rounding-sized overlaps; real penetration
@@ -196,11 +212,15 @@ func (grid *Grid) moveWithLimit(ctx context.Context, box Rect, delta Vector, dyn
 	if !validRect(box, false) || !validVector(delta) || limit < 0 || limit > maxBlockingContacts {
 		return MoveResult{}, fmt.Errorf("invalid movement")
 	}
+	original := box
 	box, err = grid.separateTolerance(ctx, box, dynamic, ignore)
 	if err != nil {
 		return MoveResult{}, err
 	}
 	result := MoveResult{Bounds: box}
+	if box != original {
+		result.segments = append(result.segments, movementSegment{from: original, to: box})
+	}
 	remaining := delta
 	for i := 0; i < limit && (remaining.X != 0 || remaining.Y != 0); i++ {
 		hit, found, sweepErr := grid.Sweep(ctx, result.Bounds, remaining, dynamic, SweepOptions{Ignore: ignore})
@@ -208,14 +228,14 @@ func (grid *Grid) moveWithLimit(ctx context.Context, box Rect, delta Vector, dyn
 			return MoveResult{}, sweepErr
 		}
 		if !found {
-			result.Bounds = moved(result.Bounds, remaining)
+			result.travel(remaining)
 			remaining = Vector{}
 			break
 		}
 		if hit.Normal == (Vector{}) {
 			return MoveResult{}, fmt.Errorf("movement starts overlapping %s", hit.Collider.ID)
 		}
-		result.Bounds = moved(result.Bounds, Vector{X: remaining.X * hit.Time, Y: remaining.Y * hit.Time})
+		result.travel(Vector{X: remaining.X * hit.Time, Y: remaining.Y * hit.Time})
 		result.Contacts = append(result.Contacts, hit)
 		remaining.X *= 1 - hit.Time
 		remaining.Y *= 1 - hit.Time

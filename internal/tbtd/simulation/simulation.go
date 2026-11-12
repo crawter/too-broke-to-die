@@ -23,6 +23,8 @@ type World struct {
 	grid     *Grid
 	state    State
 	previous State
+	motion   playerMotion
+	lethal   []Rect
 }
 
 // TickInput supplies one actor's velocity and the one-way platform currently
@@ -109,6 +111,7 @@ func NewWorld(ctx context.Context, owner *campaign.Campaign, manifest *content.C
 	var solids, lethal []content.Rect
 	var spawn content.GeometryPoint
 	found := false
+	isBay := false
 	for _, prologue := range location.Prologue {
 		if prologue.Anchor == plan.Anchor {
 			found = true
@@ -150,6 +153,7 @@ func NewWorld(ctx context.Context, owner *campaign.Campaign, manifest *content.C
 			continue
 		}
 		found = true
+		isBay = true
 		world.state.Encounter = room.Encounter
 		var selected *content.ServiceBay
 		for i := range bays {
@@ -245,6 +249,14 @@ func NewWorld(ctx context.Context, owner *campaign.Campaign, manifest *content.C
 	}
 	world.state.Player = Body{ID: "player", Bounds: Rect{X: spawn.X - PlayerWidth/2, Y: spawn.Y, Width: PlayerWidth, Height: PlayerHeight}}
 	world.state.HasPlayer = true
+	world.motion = newPlayerMotion()
+	// Authored static lethal volumes are distinct from timed hazard stations.
+	// Those stations are activated by the later hazard execution system.
+	if !isBay {
+		for _, volume := range lethal {
+			world.lethal = append(world.lethal, rectFromContent(volume))
+		}
+	}
 	body := world.state.Player.Bounds
 	if body.X < bounds.X || body.Y < bounds.Y || body.X+body.Width > bounds.X+bounds.Width || body.Y+body.Height > bounds.Y+bounds.Height {
 		return nil, fmt.Errorf("anchor %s is outside the encounter", plan.Anchor)
