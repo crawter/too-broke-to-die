@@ -48,10 +48,15 @@ func (world *World) StartPlayerAction(ctx context.Context, action ActionKind, du
 	}
 	world.motion.action = action
 	world.motion.actionUntil = world.state.Tick + uint64(ticks)
-	if action == HurtAction || action == DeathAction {
-		world.motion.immune = false
+	if action > AttackAction {
+		world.combat.attack = PlayerAttack{}
+		world.combat.hitTargets = nil
+	}
+	if action == HurtAction {
+		world.motion.immune = world.state.Tick < world.combat.immuneUntil
 	}
 	if action == DeathAction {
+		world.state.Health = 0
 		world.motion.dead = true
 		world.motion.buffer = ""
 		world.motion.immune = false
