@@ -21,13 +21,13 @@ PDD §11.4 supplies mitigations and gate responsibilities. These risks remain op
 | PDD risk | Exposure / next evidence |
 |---|---|
 | RISK-01, RISK-10 | Missing binary media and provenance; representative final assets for PH-02 and complete handoff, originality and rights review for PH-08/09. |
-| RISK-02 | Dependency selection can break Linux or Windows builds; run the source gate and review actual selected licenses. |
+| RISK-02 | Dependency selection can break the Linux build; run the source gate and review actual selected licenses. |
 | RISK-03 | Wrong-thread native calls or unsafe cleanup; ownership and lifecycle tests, then desktop verification. |
 | RISK-04, RISK-14 | Interrupted or lost saves and physical media loss; fault-inject commit boundaries, retain valid revisions, document limits and never invent receipts. |
 | RISK-05, RISK-09 | Repetitive families or misdirected satire; play and native Russian editorial review across the full campaign. |
 | RISK-06, RISK-07 | Effects hide warnings, or aftermath blocks a mandatory route; audit readability, anchors, actors and recovery under all applicable variants. |
 | RISK-08 | Final media exceeds resource budgets; measure final loads, memory and endurance. |
-| RISK-11 | Driver/device differences and unexecuted Windows runtime; manual desktop, device and Windows smoke qualification. |
+| RISK-11 | Driver/device differences; manual Linux desktop and device qualification. |
 | RISK-12 | Signing, storefront, rating and jurisdiction decisions belong to separate authorized release work, not this implementation task. |
 | RISK-13 | Header uncertainty addressed by the person's exact repository convention in [README](../README.md#source-headers); application and compliance still require source review. |
 

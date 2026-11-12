@@ -1,10 +1,10 @@
 # Requirements baseline
 
-The attached `too-broke-to-die-pdd-linux.md` (PDD) is the authority; section and scenario references below refer to it. This index covers the complete game, not just a slice. PDD §13 contains the individual requirements and acceptance wording; grouping here does not relax any of them. The task authorizes implementation from `main` despite the PDD's document-only status; it does not authorize release or other out-of-scope external actions.
+The attached `too-broke-to-die-pdd-linux.md` (PDD) is the authority subject to the revised Linux-only scope; section and scenario references below refer to it. This index covers the complete game, not just a slice. PDD §13 contains the individual requirements and acceptance wording as applicable to that scope. The task authorizes implementation from `main` despite the PDD's document-only status; it does not authorize release or other out-of-scope external actions.
 
 ## Complete-game contract
 
-- One authored, offline, single-player 2D desktop game, Go and raylib, Linux x86-64 and Windows x86-64; Linux is the development and automated-check platform and Windows is cross-compiled. No account, service, updater, or network is required during play. Russian is the primary language of dialogue, UI, signs, and documents (PDD §§1, 10.1–10.2).
+- One authored, offline, single-player 2D desktop game, Go and raylib, for Linux x86-64. Linux is the development and automated-check platform. No account, service, updater, or network is required during play. Russian is the primary language of dialogue, UI, signs, and documents (PDD §§1, 10.1–10.2).
 - The playable prologue establishes Grisha's theft of cancer-treatment donations, heart attack, funeral resurrection and Vera's subsidy bargain. The acts proceed through the hospital, church, ministry and institute, with Potroshin, Savva, Blagoev and Viralsky respectively; after the institute, return to the ministry (PDD §§4–6, 8.2, 8.6–8.7).
 - Exactly 96 authored service tickets (four institutions × four families × six distinct instances) and four closure deeds yield exactly 100 distinct credits. Each institution contributes 25. The first three closures unlock the next act; the institute reaches 99 before its boss and `D-INS-END` is credit 100. Boss kills, repeated tickets, refills, combat and ending scenes grant no extra credit. Credit derives from durable distinct receipts, not a mutable balance or moral score (PDD §§7.9, 8.3–8.5, 8.9–8.10).
 - At 100 credits and NAR-09, the ministry issues the permit without repayment or another deed. Consent can be cancelled; once committed, authorized death leads to Satan's rejection, appointment as health minister, and the casino ceremony. The mandatory acknowledged tableau combines the ribbon, four antagonists, Nina's evacuation, the burning children's hospital and the exact closing text. No alternate redemption ending replaces it (PDD §§6.9–6.12, 8.9).
@@ -18,7 +18,7 @@ These are coverage targets, not passed results. PDD §12.2 maps each SYS-T, CAM-
 
 | PDD §13 requirements | Scope and PDD authority | Scenario families / audit |
 |---|---|---|
-| 1–3, 58–62 | Offline product, authorization distinction, Russian, platforms, builds and distributions (§§1, 10.1–10.2) | FGA-B01–B09; FGA-V05; AUD-08, AUD-10 |
+| 1–3, 58–62 | Offline product, authorization distinction, Russian, Linux build and distribution (§§1, 10.1–10.2) | Applicable Linux portions of FGA-B01–B08; FGA-V05; AUD-08, AUD-10 |
 | 4–15 | Premise, characters, institutions, adult tone and canonical story (§§2–6) | CAM-T01, CAM-T16–17; FGA-N01–N07; AUD-01, AUD-09 |
 | 16–21 | Input, movement, combat, limbs, feces and physical comedy (§§7.2–7.8) | SYS-T01–T05, SYS-T11; FGA-G01–G07, FGA-G10; FGA-E03 |
 | 22–29 | Certification, consequences, feedback, state, persistence and ending eligibility (§§7.9–7.14) | SYS-T06–T14; FGA-C03–C08, FGA-R01–R11, FGA-V04; AUD-03–04 |
@@ -27,6 +27,6 @@ These are coverage targets, not passed results. PDD §12.2 maps each SYS-T, CAM-
 | 63–70 | Architecture, boundaries, Go conventions, content validation and deterministic simulation (§§10.3–10.7) | FGA-E01–E05, FGA-G01–G10; AUD-05 |
 | 71–76 | Save schema, ownership, idempotency and honest recovery (§§10.8–10.9) | FGA-R01–R11, FGA-E04; AUD-03–04, AUD-06 |
 | 77–82 | Main-thread native ownership, lifecycle, failures and local observability (§§10.10–10.12) | FGA-E06–E10, FGA-B05–B08, FGA-R06, FGA-R11 |
-| 83–96 | Phase gates, all scenario matrices, full runs, risks and readiness separation (§§11–12) | PH-00–PH-09; SYS-T01–T14, CAM-T01–T17, PRE-T01–T18; FGA-N01–N07, G01–G10, C01–C08, R01–R11, V01–V08, B01–B09, P01–P05, E01–E10; AUD-01–10 |
+| 83–96 | Phase gates, applicable scenario matrices, full runs, risks and readiness separation (§§11–12) | PH-00–PH-09; SYS-T01–T14, CAM-T01–T17, PRE-T01–T18; FGA-N01–N07, G01–G10, C01–C08, R01–R11, V01–V08, applicable Linux portions of B01–B08, P01–P05, E01–E10; AUD-01–10 |
 
-Each shortened FGA range in the last row retains the `FGA-` prefix. All applicable requirements, parameter sets and specialist reviews are needed for full-game acceptance; a scenario definition, source check or phase demonstration alone is not evidence of completion.
+Each shortened FGA range in the last row retains the `FGA-` prefix. All requirements, parameter sets and specialist reviews applicable to the Linux-only scope are needed for full-game acceptance; a scenario definition, source check or phase demonstration alone is not evidence of completion.
