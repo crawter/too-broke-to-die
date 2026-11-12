@@ -16,6 +16,9 @@ type Attempt struct {
 	Deed content.DeedID `json:"deed"`
 
 	Number uint64 `json:"number"`
+
+	// Failed describes transient failed work, cleared on restoration or reset.
+	Failed string `json:"failed,omitempty"`
 }
 
 // Emergency records the committed start of a shared batch emergency. Later
@@ -42,9 +45,21 @@ type State struct {
 
 	Defeated []content.EncounterID `json:"defeated"`
 
+	EncounterEvents []EncounterEvent `json:"encounter_events"`
+
 	Consequences []content.ConsequenceID `json:"consequences"`
 
 	Emergencies []Emergency `json:"emergencies"`
+
+	Incidents []Incident `json:"incidents"`
+
+	CriticalItems []CriticalItemRecord `json:"critical_items"`
+
+	CampaignID string `json:"campaign_id,omitempty"`
+
+	OperationSequence uint64 `json:"operation_sequence,omitempty"`
+
+	LatestOperation *OperationRecord `json:"latest_operation,omitempty"`
 
 	Anchor content.AnchorID `json:"anchor"`
 
@@ -68,8 +83,15 @@ func (snapshot Snapshot) Data(ctx context.Context) State {
 	data.Attempts = slices.Clone(data.Attempts)
 	data.Narratives = slices.Clone(data.Narratives)
 	data.Defeated = slices.Clone(data.Defeated)
+	data.EncounterEvents = slices.Clone(data.EncounterEvents)
 	data.Consequences = slices.Clone(data.Consequences)
 	data.Emergencies = slices.Clone(data.Emergencies)
+	data.Incidents = slices.Clone(data.Incidents)
+	data.CriticalItems = slices.Clone(data.CriticalItems)
+	if data.LatestOperation != nil {
+		record := *data.LatestOperation
+		data.LatestOperation = &record
+	}
 	return data
 }
 
@@ -85,7 +107,7 @@ func (campaign *Campaign) Restore(ctx context.Context, state State) (_ Snapshot,
 	if err = campaign.Validate(ctx, candidate); err != nil {
 		return Snapshot{}, err
 	}
-	return candidate, nil
+	return campaign.clearWork(ctx, candidate), nil
 }
 
 // Validate checks receipt membership, chronology and the bindings this package owns.
@@ -100,7 +122,13 @@ func (campaign *Campaign) Validate(ctx context.Context, snapshot Snapshot) (err 
 		if _, ok := campaign.deeds[attempt.Deed]; !ok || seenAttempts[attempt.Deed] || attempt.Number == 0 {
 			return fmt.Errorf("%w: attempt %s", ErrInvalid, attempt.Deed)
 		}
+		if attempt.Failed != "" && (attempt.Deed != data.Active || attempt.Failed != campaign.deeds[attempt.Deed].Failure) {
+			return fmt.Errorf("%w: failed attempt %s", ErrInvalid, attempt.Deed)
+		}
 		seenAttempts[attempt.Deed] = true
+	}
+	if err = campaign.validateIncidents(ctx, data); err != nil {
+		return err
 	}
 	seenNarratives := map[content.NarrativeID]bool{}
 	for _, id := range data.Narratives {
@@ -154,8 +182,14 @@ func (campaign *Campaign) Validate(ctx context.Context, snapshot Snapshot) (err 
 			}
 		}
 	}
-	if !slices.Equal(consequences, data.Consequences) || !slices.Equal(emergencies, data.Emergencies) {
+	if !slices.Equal(consequences, data.Consequences) || len(emergencies) != len(data.Emergencies) {
 		return fmt.Errorf("%w: consequence or emergency bindings", ErrInvalid)
+	}
+	for i, emergency := range emergencies {
+		actual := data.Emergencies[i]
+		if actual.ID != emergency.ID || (actual.Stage != EmergencyActive && actual.Stage != EmergencyAftermath) {
+			return fmt.Errorf("%w: emergency %s", ErrInvalid, actual.ID)
+		}
 	}
 	if seenNarratives["NAR-05"] != (receiptIndex(data.Receipts, "D-HOS-END") >= 0) || seenNarratives["NAR-09"] != (receiptIndex(data.Receipts, "D-INS-END") >= 0) {
 		return fmt.Errorf("%w: closure narrative", ErrInvalid)
@@ -181,10 +215,16 @@ func (campaign *Campaign) Validate(ctx context.Context, snapshot Snapshot) (err 
 				valid = true
 			}
 		}
+		for _, item := range data.CriticalItems {
+			definition := campaign.items[item.Item]
+			if data.Anchor == definition.AcquireAnchor || (item.Consumed.Sequence != 0 && data.Anchor == definition.ConsumeAnchor) {
+				valid = true
+			}
+		}
 		if !valid {
 			return fmt.Errorf("%w: anchor %s", ErrInvalid, data.Anchor)
 		}
-	} else if len(data.Receipts) != 0 || len(data.Defeated) != 0 {
+	} else if len(data.Receipts) != 0 || len(data.Defeated) != 0 || len(data.CriticalItems) != 0 {
 		return fmt.Errorf("%w: missing anchor", ErrInvalid)
 	}
 	return nil

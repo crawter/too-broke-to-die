@@ -32,6 +32,7 @@ type Campaign struct {
 	batches []content.CampaignBatch
 	gates   map[content.GateID]content.Gate
 	objects map[content.ObjectID]content.Object
+	items   map[CriticalItemID]CriticalItemDefinition
 }
 
 // New constructs a campaign from the validated content manifest.
@@ -75,6 +76,7 @@ func (campaign *Campaign) Start(ctx context.Context, snapshot Snapshot) (_ Snaps
 }
 
 // Accept prepares an active ticket. Switching tickets requires Reset first.
+// Durable callers should use Prepare with AttemptAccept so retries retain their identity.
 func (campaign *Campaign) Accept(ctx context.Context, snapshot Snapshot, id content.DeedID) (_ Snapshot, err error) {
 	defer mon.Task()(&ctx)(&err)
 	if err = campaign.Validate(ctx, snapshot); err != nil {
@@ -113,6 +115,7 @@ func (campaign *Campaign) Accept(ctx context.Context, snapshot Snapshot, id cont
 }
 
 // Reset starts a new attempt for the active ticket without changing receipts.
+// Durable callers should use Prepare with AttemptReset; this helper has no retry identity.
 func (campaign *Campaign) Reset(ctx context.Context, snapshot Snapshot) (_ Snapshot, err error) {
 	defer mon.Task()(&ctx)(&err)
 	if err = campaign.Validate(ctx, snapshot); err != nil {
@@ -128,6 +131,7 @@ func (campaign *Campaign) Reset(ctx context.Context, snapshot Snapshot) (_ Snaps
 				return Snapshot{}, fmt.Errorf("%w: attempt overflow", ErrInvalid)
 			}
 			data.Attempts[i].Number++
+			data.Attempts[i].Failed = ""
 			return Snapshot{data: data}, nil
 		}
 	}
@@ -135,13 +139,20 @@ func (campaign *Campaign) Reset(ctx context.Context, snapshot Snapshot) (_ Snaps
 }
 
 // Abandon clears an uncertified active ticket before selecting another one.
-// Its attempt history remains available for subsequent acceptance.
+// The caller must warn and obtain confirmation before switching. Its attempt
+// history remains available for subsequent acceptance. Durable callers use
+// Prepare with AttemptAbandon to bind the change to an operation identity.
 func (campaign *Campaign) Abandon(ctx context.Context, snapshot Snapshot) (_ Snapshot, err error) {
 	defer mon.Task()(&ctx)(&err)
 	if err = campaign.Validate(ctx, snapshot); err != nil {
 		return Snapshot{}, err
 	}
 	data := snapshot.Data(ctx)
+	for i := range data.Attempts {
+		if data.Attempts[i].Deed == data.Active {
+			data.Attempts[i].Failed = ""
+		}
+	}
 	data.Active = ""
 	return Snapshot{data: data}, nil
 }
@@ -202,6 +213,11 @@ func (campaign *Campaign) Apply(ctx context.Context, snapshot Snapshot, event Ce
 	}
 	if data.Active != event.Deed || attemptNumber(data.Attempts, event.Deed) != event.Attempt {
 		return Snapshot{}, Receipt{}, fmt.Errorf("%w: inactive or wrong attempt %s", ErrBlocked, event.Deed)
+	}
+	for _, attempt := range data.Attempts {
+		if attempt.Deed == event.Deed && attempt.Failed != "" {
+			return Snapshot{}, Receipt{}, fmt.Errorf("%w: failed attempt %s", ErrBlocked, event.Deed)
+		}
 	}
 	if missing := missingDeed(deed.Deed, data); len(missing) != 0 {
 		return Snapshot{}, Receipt{}, fmt.Errorf("%w: %v", ErrBlocked, missing)
