@@ -29,6 +29,7 @@ type World struct {
 	combat   combatState
 	feces    fecesState
 	objects  objectState
+	service  serviceState
 }
 
 // TickInput supplies one actor's velocity and the one-way platform currently
@@ -319,6 +320,9 @@ func NewWorld(ctx context.Context, owner *campaign.Campaign, manifest *content.C
 		}
 	}
 	if err = world.installAuthoredInteractions(ctx); err != nil {
+		return nil, err
+	}
+	if err = world.installService(ctx, manifest, bays, committed); err != nil {
 		return nil, err
 	}
 	world.previous = cloneState(world.state)
