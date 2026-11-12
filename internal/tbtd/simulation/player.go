@@ -46,6 +46,11 @@ type PlayerCommand struct {
 // the tick just completed, not protection against lethal terrain or crushing.
 type PlayerStatus struct {
 	Limbs          LimbMask
+	SelectedSocket SocketID
+	RunSpeed       float64
+	JumpSpeed      float64
+	EvadeSpeed     float64
+	CanCarry       bool
 	Facing         int
 	Action         ActionKind
 	OrdinaryImmune bool
@@ -87,7 +92,12 @@ func (world *World) PlayerStatus() PlayerStatus {
 		return PlayerStatus{}
 	}
 	motion := world.motion
-	return PlayerStatus{Limbs: motion.limbs, Facing: motion.facing, Action: motion.action, OrdinaryImmune: motion.immune, Dead: motion.dead, Suspended: motion.suspended, Buffered: motion.buffer}
+	selected := world.limbs.selected
+	if selected == "" {
+		selected = SocketLeftArm
+	}
+	run, jump, evade := legSpeeds(motion.limbs)
+	return PlayerStatus{Limbs: motion.limbs, SelectedSocket: selected, RunSpeed: run, JumpSpeed: jump, EvadeSpeed: evade, CanCarry: motion.limbs&(LeftArm|RightArm) != 0, Facing: motion.facing, Action: motion.action, OrdinaryImmune: motion.immune, Dead: motion.dead, Suspended: motion.suspended, Buffered: motion.buffer}
 }
 
 // SetPlayerLimbs updates capabilities without changing the collision box.
@@ -98,6 +108,20 @@ func (world *World) SetPlayerLimbs(ctx context.Context, limbs LimbMask) (err err
 		return fmt.Errorf("invalid player limbs")
 	}
 	world.motion.limbs = limbs
+	// A caller restoring or changing the body cannot leave an object for an
+	// already-attached socket usable as another copy of that limb.
+	for i := len(world.limbs.objects) - 1; i >= 0; i-- {
+		object := world.limbs.objects[i]
+		if socketMask(object.Socket)&limbs != 0 || object.Generation != world.limbs.generation {
+			if world.limbs.carried == object.ID {
+				world.limbs.carried, world.limbs.payload = "", false
+			}
+			world.limbs.objects = append(world.limbs.objects[:i], world.limbs.objects[i+1:]...)
+		}
+	}
+	if limbs&(LeftArm|RightArm) == 0 && world.limbs.carried != "" {
+		world.dropCarried(ctx)
+	}
 	count := 0
 	for _, limb := range []LimbMask{LeftArm, RightArm, LeftLeg, RightLeg} {
 		if limbs&limb != 0 {
@@ -119,6 +143,13 @@ func (world *World) SuspendPlayer(ctx context.Context) {
 	world.motion.buffer = ""
 	world.motion.held = 0
 	world.motion.jumpHeld = false
+	world.cancelInterruptedLimbAction(ctx, PlayerCommand{})
+	world.limbs.regenHeld = false
+	world.limbs.interactHeld = false
+	world.limbs.throwHeld = false
+	world.limbs.removeHeld = false
+	world.limbs.payloadHeld = false
+	world.limbs.throwPending = ""
 }
 
 // ResumePlayer requires the session's current held controls, so an input held

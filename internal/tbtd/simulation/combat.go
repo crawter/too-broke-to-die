@@ -170,7 +170,7 @@ func (world *World) advancePlayerAttack(ctx context.Context) (err error) {
 		attack.Released = true
 		world.state.Feces--
 		world.combat.releases = append(world.combat.releases, AttackRelease{AttackID: attack.ID, ProjectileID: fmt.Sprintf("player-%d", attack.ID), Payload: "feces"})
-		world.launchPlayerProjectile(*attack)
+		world.launchPlayerProjectile(ctx, *attack)
 	}
 	switch {
 	case elapsed < windup:
