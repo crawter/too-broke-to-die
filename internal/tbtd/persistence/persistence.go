@@ -18,7 +18,9 @@ import (
 // Store owns the profile lock and one serialized worker. Call Run under the
 // application supervisor, and Close before releasing any related resources.
 // Poll consumes a completed result, allowing the original request ID to be
-// reused for its retry, resolution, or confirmed discard.
+// reused for its retry, resolution, or confirmed discard. An unclean exit
+// before the acknowledged selection's recovery fence is cleared requires an
+// explicit choice, even if the selection itself succeeded.
 type Store struct {
 	mu              sync.Mutex
 	files           revisionFiles
@@ -43,6 +45,8 @@ type Store struct {
 	pending         *session.ProgressInput
 	pendingResolved bool
 	selectorPending *pendingSelector
+	selectorFence   *selectorIntent
+	activeCancel    context.CancelFunc
 }
 
 type work struct {
@@ -190,6 +194,9 @@ func (store *Store) stop() {
 	if !store.stopping {
 		store.stopping = true
 		store.drain, store.cancelDrain = context.WithTimeout(context.Background(), store.capacity)
+		if store.activeCancel != nil {
+			context.AfterFunc(store.drain, store.activeCancel)
+		}
 		close(store.queue)
 	}
 }
@@ -215,7 +222,9 @@ func (store *Store) serve(ctx context.Context) (err error) {
 	stopOnCancel := context.AfterFunc(ctx, store.stop)
 	defer stopOnCancel()
 	defer func() {
+		panicked := false
 		if recovered := recover(); recovered != nil {
+			panicked = true
 			err = errors.Join(err, fmt.Errorf("storage worker panic: %v", recovered))
 		}
 		store.stop()
@@ -227,6 +236,11 @@ func (store *Store) serve(ctx context.Context) (err error) {
 		}
 		if store.selectorPending != nil {
 			err = errors.Join(err, errors.New("unresolved selector installation"))
+		}
+		if !panicked {
+			if clearErr := store.clearSelectorFence(store.drain); clearErr != nil {
+				err = errors.Join(err, fmt.Errorf("clear selector fence: %w", clearErr))
+			}
 		}
 		store.mu.Lock()
 		store.closeErr = errors.Join(store.closeErr, err)
@@ -251,32 +265,34 @@ func (store *Store) serve(ctx context.Context) (err error) {
 func (store *Store) execute(item work) {
 	taskCtx := item.ctx
 	defer mon.Task()(&taskCtx)(nil)
+	published := false
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			if item.progress != nil {
-				input := item.progress.Data()
-				if input.Kind == session.CommitProgress || input.Kind == session.ResolveProgress {
-					store.pending = &input
+			if !published {
+				if item.progress != nil {
+					input := item.progress.Data()
+					if input.Kind == session.CommitProgress || input.Kind == session.ResolveProgress {
+						store.pending = &input
+					}
 				}
+				store.failWork(item, true)
 			}
-			store.failWork(item, true)
 			panic(recovered)
 		}
 	}()
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(taskCtx), store.capacity)
-	defer cancel()
 	store.mu.Lock()
-	drain := store.drain
-	store.mu.Unlock()
-	var stop func() bool
-	if drain != nil {
-		if drain.Err() != nil {
-			cancel()
-		} else {
-			stop = context.AfterFunc(drain, cancel)
-			defer stop()
-		}
+	store.activeCancel = cancel
+	if store.drain != nil {
+		context.AfterFunc(store.drain, cancel)
 	}
+	store.mu.Unlock()
+	defer func() {
+		store.mu.Lock()
+		store.activeCancel = nil
+		store.mu.Unlock()
+		cancel()
+	}()
 	if item.progress != nil {
 		input := item.progress.Data()
 		var result session.ProgressResultData
@@ -287,15 +303,26 @@ func (store *Store) execute(item work) {
 		}
 		store.mu.Lock()
 		store.progress[input.ID] = session.NewProgressResult(ctx, result)
+		published = true
 		if store.stopping && result.Status != session.StorageSucceeded && result.Status != session.StorageNotInstalled {
 			store.closeErr = errors.Join(store.closeErr, fmt.Errorf("draining request %s (%s): %s", input.ID, input.Operation.Event, result.Status))
 		}
 		store.mu.Unlock()
+		// The outcome is already published. Clearing this fence earlier could
+		// turn a failed final settlement into an apparent success after restart.
+		if result.Status == session.StorageSucceeded && store.selectorFence != nil {
+			if clearErr := store.clearSelectorFence(ctx); clearErr != nil {
+				store.mu.Lock()
+				store.closeErr = errors.Join(store.closeErr, fmt.Errorf("clear selector fence: %w", clearErr))
+				store.mu.Unlock()
+			}
+		}
 	} else {
 		input := item.settings.Data(ctx)
 		result := store.processSettings(ctx, input)
 		store.mu.Lock()
 		store.settings[input.ID] = session.NewSettingsResult(ctx, result)
+		published = true
 		if store.stopping && result.Status != session.StorageSucceeded {
 			store.closeErr = errors.Join(store.closeErr, fmt.Errorf("draining settings request %s: %s", input.ID, result.Status))
 		}

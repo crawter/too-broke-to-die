@@ -811,3 +811,237 @@ func TestConcurrentSubmissionAndPolling(t *testing.T) {
 		}
 	}
 }
+
+type settlementDeadlineFault struct {
+	*platform.Root
+	failed       bool
+	opDeadline   time.Time
+	rearmStarted chan time.Time
+}
+
+func (files *settlementDeadlineFault) ReplaceFile(ctx context.Context, source, destination string) (platform.ReplaceResult, error) {
+	if destination == selectorGuardName && !files.failed {
+		data, err := files.Root.ReadFile(ctx, source, maxProfileFile)
+		if err != nil {
+			return platform.ReplaceResult{}, err
+		}
+		var record selectorIntent
+		if err := decodeChecked(ctx, data, "TBTD-SELECTOR-INTENT", &record); err != nil {
+			return platform.ReplaceResult{}, err
+		}
+		if !record.Pending {
+			files.opDeadline, _ = ctx.Deadline()
+			result, err := files.Root.ReplaceFile(ctx, source, destination)
+			if err != nil {
+				return result, err
+			}
+			files.failed = true
+			return result, errInjected
+		}
+	}
+	return files.Root.ReplaceFile(ctx, source, destination)
+}
+
+func (files *settlementDeadlineFault) WriteTemp(ctx context.Context, dir string, data []byte, max int64) (string, error) {
+	if files.failed {
+		var record selectorIntent
+		if decodeChecked(ctx, data, "TBTD-SELECTOR-INTENT", &record) == nil && record.Pending {
+			deadline, _ := ctx.Deadline()
+			select {
+			case files.rearmStarted <- deadline:
+			default:
+			}
+			<-ctx.Done()
+			return "", ctx.Err()
+		}
+	}
+	return files.Root.WriteTemp(ctx, dir, data, max)
+}
+
+func TestSelectorRecoveryUsesOwnedDeadline(t *testing.T) {
+	codec, _, _ := fixture(t)
+	path := t.TempDir()
+	budget := 300 * time.Millisecond
+	store, err := Open(t.Context(), path, codec, 4, budget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := newProfileCampaign(t, store)
+	files := &settlementDeadlineFault{Root: store.root, rearmStarted: make(chan time.Time, 2)}
+	store.files = files
+	request, err := session.NewProgressRequest(t.Context(), session.ProgressInput{ID: "new", Kind: session.CreateCampaign, Campaign: testCampaignID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Submit(t.Context(), request); err != nil {
+		t.Fatal(err)
+	}
+	run := make(chan error, 1)
+	go func() { run <- store.Run(context.Background()) }()
+	var recoveryDeadline time.Time
+	select {
+	case recoveryDeadline = <-files.rearmStarted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("settlement did not reach re-arm")
+	}
+	if recoveryDeadline.IsZero() || !recoveryDeadline.Equal(files.opDeadline) {
+		t.Errorf("re-arm restarted deadline: operation=%v recovery=%v", files.opDeadline, recoveryDeadline)
+	}
+	closed := make(chan error, 1)
+	go func() { closed <- store.Close() }()
+	select {
+	case err := <-run:
+		if err == nil {
+			t.Error("unresolved worker exit not reported")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker exceeded owned lifetime")
+	}
+	if err := <-closed; err == nil {
+		t.Fatal("shutdown hid unresolved selection")
+	}
+	result, err := store.Poll(t.Context(), "new")
+	created := result.Data(t.Context())
+	if err != nil || created.Status != session.StorageAmbiguous || created.RevisionKnown || created.Campaign == first.Campaign {
+		t.Fatalf("selection acknowledged despite deadline: %+v %v", created, err)
+	}
+	reopened, err := Open(t.Context(), path, codec, 4, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := reopened.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	loaded := reopened.processProgress(t.Context(), session.ProgressInput{ID: "load", Kind: session.LoadActive})
+	if loaded.Status != session.StorageAmbiguous || loaded.Campaign != "" || loaded.RevisionKnown || len(loaded.Candidates) != 2 {
+		t.Fatalf("deadline silently selected a campaign: %+v", loaded)
+	}
+}
+
+func TestSelectorRecoveryHonorsEarlierDrainDeadline(t *testing.T) {
+	codec, _, _ := fixture(t)
+	store, err := Open(t.Context(), t.TempDir(), codec, 4, 500*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newProfileCampaign(t, store)
+	files := &settlementDeadlineFault{Root: store.root, rearmStarted: make(chan time.Time, 2)}
+	store.files = files
+	request, err := session.NewProgressRequest(t.Context(), session.ProgressInput{ID: "new", Kind: session.CreateCampaign, Campaign: testCampaignID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Submit(t.Context(), request); err != nil {
+		t.Fatal(err)
+	}
+	// Establish a shorter drain before starting the queued operation. This
+	// test-only adjustment makes the two deadlines observably distinct.
+	store.stop()
+	store.capacity = 4 * time.Second
+	closed := make(chan error, 1)
+	go func() { closed <- store.Close() }()
+	select {
+	case <-files.rearmStarted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("settlement did not reach re-arm")
+	}
+	select {
+	case <-store.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker outlived the drain deadline")
+	}
+	if err := <-closed; err == nil {
+		t.Fatal("deadline and unresolved selection not reported")
+	}
+	result, err := store.Poll(t.Context(), "new")
+	if err != nil || result.Data(t.Context()).Status != session.StorageAmbiguous || result.Data(t.Context()).RevisionKnown {
+		t.Fatalf("deadline acknowledged selection: %+v %v", result.Data(t.Context()), err)
+	}
+}
+
+type fencePanicFiles struct {
+	*platform.Root
+	store         *Store
+	beforeReplace bool
+	observed      chan session.StorageStatus
+}
+
+func (files *fencePanicFiles) ReplaceFile(ctx context.Context, source, destination string) (platform.ReplaceResult, error) {
+	if destination == selectorFenceName {
+		data, err := files.Root.ReadFile(ctx, source, maxProfileFile)
+		if err != nil {
+			return platform.ReplaceResult{}, err
+		}
+		var record selectorIntent
+		if err := decodeChecked(ctx, data, "TBTD-SELECTOR-INTENT", &record); err != nil {
+			return platform.ReplaceResult{}, err
+		}
+		if !record.Pending {
+			files.store.mu.Lock()
+			status := files.store.progress["new"].Data(ctx).Status
+			files.store.mu.Unlock()
+			files.observed <- status
+			if !files.beforeReplace {
+				result, err := files.Root.ReplaceFile(ctx, source, destination)
+				if err != nil {
+					return result, err
+				}
+			}
+			panic("injected fence cleanup failure")
+		}
+	}
+	return files.Root.ReplaceFile(ctx, source, destination)
+}
+
+func TestFenceCleanupFollowsPublishedOutcome(t *testing.T) {
+	for _, before := range []bool{true, false} {
+		t.Run(fmt.Sprintf("before-replace-%t", before), func(t *testing.T) {
+			codec, _, _ := fixture(t)
+			path := t.TempDir()
+			store, err := Open(t.Context(), path, codec, 4, time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			first := newProfileCampaign(t, store)
+			files := &fencePanicFiles{Root: store.root, store: store, beforeReplace: before, observed: make(chan session.StorageStatus, 1)}
+			store.files = files
+			request, err := session.NewProgressRequest(t.Context(), session.ProgressInput{ID: "new", Kind: session.CreateCampaign, Campaign: testCampaignID})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Submit(t.Context(), request); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Run(t.Context()); err == nil {
+				t.Fatal("cleanup panic was hidden")
+			}
+			if status := <-files.observed; status != session.StorageSucceeded {
+				t.Fatalf("fence cleared before result publication: %s", status)
+			}
+			result, err := store.Poll(t.Context(), "new")
+			created := result.Data(t.Context())
+			if err != nil || created.Status != session.StorageSucceeded || created.Campaign == first.Campaign || !created.RevisionKnown {
+				t.Fatalf("published result replaced by cleanup failure: %+v %v", created, err)
+			}
+			reopened, err := Open(t.Context(), path, codec, 4, time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if err := reopened.Close(); err != nil {
+					t.Error(err)
+				}
+			})
+			loaded := reopened.processProgress(t.Context(), session.ProgressInput{ID: "load", Kind: session.LoadActive})
+			if before {
+				if loaded.Status != session.StorageAmbiguous || loaded.Campaign != "" || len(loaded.Candidates) != 2 {
+					t.Fatalf("pending fence was ignored: %+v", loaded)
+				}
+			} else if loaded.Status != session.StorageSucceeded || loaded.Campaign != created.Campaign || loaded.Snapshot.Credits() != 0 {
+				t.Fatalf("published selection not recovered: %+v", loaded)
+			}
+		})
+	}
+}

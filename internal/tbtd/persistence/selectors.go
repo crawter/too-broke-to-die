@@ -21,6 +21,7 @@ var errSelectorUnresolved = errors.New("selector installation unresolved")
 const (
 	selectorIntentName = "selector.intent.json"
 	selectorGuardName  = "selector.guard.json"
+	selectorFenceName  = "selector.fence.json"
 )
 
 type selector struct {
@@ -94,31 +95,38 @@ func newestSelector(slots [2]selectorSlot) (int, error) {
 	return best, nil
 }
 
-// The intent is durable before the selector is touched. A separate pending
-// guard remains intact while the intent is settled, so an installed but
-// unacknowledged settlement still requires explicit recovery after restart.
+// A fence stays pending until a successful selection result is published.
+// After a crash before the fence is cleared, conservatively require an
+// explicit choice even if the last selection may have succeeded.
 func (store *Store) readSelectorIntent(ctx context.Context) (_ selectorIntent, err error) {
 	defer mon.Task()(&ctx)(&err)
-	guard, guardErr := store.readSelectorRecord(ctx, selectorGuardName)
-	intent, intentErr := store.readSelectorRecord(ctx, selectorIntentName)
-	// Never turn an unknown schema into a reset, even if the other record is
-	// damaged. Neither record may be overwritten without compatibility.
-	if errors.Is(guardErr, session.SaveTooNew) {
-		return selectorIntent{}, guardErr
+	names := []string{selectorGuardName, selectorIntentName, selectorFenceName}
+	var records [3]selectorIntent
+	var failures [3]error
+	for i, name := range names {
+		records[i], failures[i] = store.readSelectorRecord(ctx, name)
 	}
-	if errors.Is(intentErr, session.SaveTooNew) {
-		return selectorIntent{}, intentErr
+	// A future schema takes precedence even over another damaged record.
+	for _, failure := range failures {
+		if errors.Is(failure, session.SaveTooNew) {
+			return selectorIntent{}, failure
+		}
 	}
-	if guardErr != nil {
-		return selectorIntent{}, guardErr
+	for _, failure := range failures {
+		if failure != nil {
+			return selectorIntent{}, failure
+		}
 	}
-	if intentErr != nil {
-		return selectorIntent{}, intentErr
+	if records[0].Pending {
+		return records[0], nil
 	}
-	if guard.Pending {
-		return guard, nil
+	if records[1].Pending {
+		return records[1], nil
 	}
-	return intent, nil
+	if records[2].Pending && (store.selectorFence == nil || *store.selectorFence != records[2]) {
+		return records[2], nil
+	}
+	return records[1], nil
 }
 
 func (store *Store) readSelectorRecord(ctx context.Context, name string) (_ selectorIntent, err error) {
@@ -161,9 +169,9 @@ func (store *Store) writeSelectorIntent(ctx context.Context, intent selectorInte
 // every damaged record first, and never replace a future or unreadable schema.
 func (store *Store) prepareSelectorIntent(ctx context.Context) (_ selectorIntent, err error) {
 	defer mon.Task()(&ctx)(&err)
-	names := []string{selectorGuardName, selectorIntentName}
-	var records [2]selectorIntent
-	var failures [2]error
+	names := []string{selectorGuardName, selectorIntentName, selectorFenceName}
+	var records [3]selectorIntent
+	var failures [3]error
 	for i, name := range names {
 		records[i], failures[i] = store.readSelectorRecord(ctx, name)
 		if failures[i] != nil && !errors.Is(failures[i], session.SaveCorrupt) {
@@ -193,6 +201,12 @@ func (store *Store) prepareSelectorIntent(ctx context.Context) (_ selectorIntent
 	}
 	if records[0].Pending {
 		return records[0], nil
+	}
+	if records[1].Pending {
+		return records[1], nil
+	}
+	if records[2].Pending && (store.selectorFence == nil || *store.selectorFence != records[2]) {
+		return records[2], nil
 	}
 	return records[1], nil
 }
@@ -294,13 +308,11 @@ func (store *Store) settleSelector(ctx context.Context, intent selectorIntent) (
 		return err
 	}
 	if _, err = store.writeSelectorRecord(ctx, selectorGuardName, settled); err != nil {
-		// Use a fresh bounded context when ordinary cancellation interrupted the
-		// settlement. The worker retains ownership until this attempt finishes.
-		recoveryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), store.capacity)
-		defer cancel()
-		_, intentErr := store.writeSelectorIntent(recoveryCtx, intent)
+		// The fence remains pending if both re-arm writes fail. Never extend the
+		// operation or drain deadline for these best-effort writes.
+		_, intentErr := store.writeSelectorIntent(ctx, intent)
 		if intentErr != nil {
-			_, guardErr := store.writeSelectorRecord(recoveryCtx, selectorGuardName, intent)
+			_, guardErr := store.writeSelectorRecord(ctx, selectorGuardName, intent)
 			return errors.Join(err, intentErr, guardErr)
 		}
 		return err
@@ -308,14 +320,49 @@ func (store *Store) settleSelector(ctx context.Context, intent selectorIntent) (
 	return nil
 }
 
+// clearSelectorFence is called only after the worker has returned the result.
+// A failure to clear can at worst cause explicit recovery on the next launch:
+// the selection was already acknowledged before this cleanup began.
+func (store *Store) clearSelectorFence(ctx context.Context) (err error) {
+	defer mon.Task()(&ctx)(&err)
+	if store.selectorFence == nil || store.selectorPending != nil {
+		return nil
+	}
+	fence, err := store.readSelectorRecord(ctx, selectorFenceName)
+	if err != nil {
+		return err
+	}
+	if fence != *store.selectorFence {
+		return session.StorageConflict
+	}
+	fence.Pending = false
+	if _, err = store.writeSelectorRecord(ctx, selectorFenceName, fence); err != nil {
+		return err
+	}
+	store.selectorFence = nil
+	return nil
+}
+
 // finishSelector retries the same bytes and settles their durable intent only
 // after the selector itself has been installed and independently confirmed.
 func (store *Store) finishSelector(ctx context.Context, pending *pendingSelector) (err error) {
 	defer mon.Task()(&ctx)(&err)
+	store.selectorFence = nil
+	if _, err = store.writeSelectorIntent(ctx, pending.intent); err != nil {
+		return err
+	}
+	if _, err = store.writeSelectorRecord(ctx, selectorFenceName, pending.intent); err != nil {
+		return err
+	}
 	if _, err = store.installProfileFile(ctx, pending.name, pending.data); err != nil {
 		return err
 	}
-	return store.settleSelector(ctx, pending.intent)
+	if err = store.settleSelector(ctx, pending.intent); err != nil {
+		return err
+	}
+	fence := pending.intent
+	store.selectorFence = &fence
+	return nil
 }
 
 // selectActive updates only the older selector. Before replacing it, an intent
@@ -382,22 +429,31 @@ func (store *Store) selectActive(ctx context.Context, id session.CampaignID) (_ 
 		return session.StorageFailed, err
 	}
 	pending := &pendingSelector{name: slots[target].name, data: data, intent: intent}
+	store.selectorFence = nil
+	if _, err = store.writeSelectorRecord(ctx, selectorFenceName, intent); err != nil {
+		store.selectorPending = pending
+		return session.StorageAmbiguous, fmt.Errorf("selector fence unresolved: %w", err)
+	}
 	installed, err = store.installProfileFile(ctx, pending.name, pending.data)
 	if err != nil {
 		if installed || previousIntent.Pending {
 			store.selectorPending = pending
 			return session.StorageAmbiguous, fmt.Errorf("selector installation unresolved: %w", err)
 		}
-		intent.Pending = false
-		if _, clearErr := store.writeSelectorIntent(ctx, intent); clearErr != nil {
+		settled := intent
+		settled.Pending = false
+		if _, clearErr := store.writeSelectorIntent(ctx, settled); clearErr != nil {
 			return session.StorageAmbiguous, errors.Join(err, clearErr)
 		}
+		// Replacement did not happen; the prior selection remains authoritative.
+		store.selectorFence = &intent
 		return session.StorageFailed, err
 	}
 	if err = store.settleSelector(ctx, intent); err != nil {
 		store.selectorPending = pending
 		return session.StorageAmbiguous, fmt.Errorf("selector confirmation unresolved: %w", err)
 	}
+	store.selectorFence = &intent
 	store.selectorPending = nil
 	return session.StorageSucceeded, nil
 }

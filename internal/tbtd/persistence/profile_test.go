@@ -6,6 +6,7 @@ package persistence
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -526,5 +527,167 @@ func TestCommitConflictAndLostAcknowledgment(t *testing.T) {
 	result = store.processProgress(t.Context(), input)
 	if result.Status != session.StorageConflicting || !result.RevisionKnown || result.Revision != 1 {
 		t.Fatalf("stale operation: %+v", result)
+	}
+}
+
+// Fail settlement after installation, then fail both re-arm attempts before
+// replacement. The independent fence must survive all three failures.
+type doubleRearmFailure struct {
+	*settlementFailure
+	attempts int
+}
+
+func (files *doubleRearmFailure) ReplaceFile(ctx context.Context, source, destination string) (platform.ReplaceResult, error) {
+	if files.fired && (destination == selectorIntentName || destination == selectorGuardName) {
+		data, err := files.Root.ReadFile(ctx, source, maxProfileFile)
+		if err != nil {
+			return platform.ReplaceResult{}, err
+		}
+		var record selectorIntent
+		if err := decodeChecked(ctx, data, "TBTD-SELECTOR-INTENT", &record); err != nil {
+			return platform.ReplaceResult{}, err
+		}
+		if record.Pending {
+			files.attempts++
+			return platform.ReplaceResult{}, errInjected
+		}
+	}
+	return files.settlementFailure.ReplaceFile(ctx, source, destination)
+}
+
+func TestSelectorFenceSurvivesFailedSettlementAndBothRearms(t *testing.T) {
+	for _, stage := range []string{"replacement", "flush", "validation"} {
+		t.Run(stage, func(t *testing.T) {
+			codec, _, _ := fixture(t)
+			path := t.TempDir()
+			store, err := Open(t.Context(), path, codec, 4, 5*time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			first := newProfileCampaign(t, store)
+			fault := &doubleRearmFailure{settlementFailure: &settlementFailure{Root: store.root, target: selectorGuardName, stage: stage}}
+			store.files = fault
+			created := store.processProgress(t.Context(), session.ProgressInput{ID: "new", Kind: session.CreateCampaign, Campaign: testCampaignID})
+			if created.Status != session.StorageAmbiguous || created.RevisionKnown || created.Campaign == first.Campaign || !fault.fired || fault.attempts != 2 {
+				t.Fatalf("expected three failures without acknowledgment: %+v, fired=%t attempts=%d", created, fault.fired, fault.attempts)
+			}
+			if err := store.Close(); err == nil {
+				t.Fatal("unresolved selection was not reported")
+			}
+			reopened, err := Open(t.Context(), path, codec, 4, 5*time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if err := reopened.Close(); err != nil {
+					t.Error(err)
+				}
+			})
+			loaded := reopened.processProgress(t.Context(), session.ProgressInput{ID: "load", Kind: session.LoadActive})
+			if loaded.Status != session.StorageAmbiguous || loaded.Campaign != "" || loaded.RevisionKnown || len(loaded.Candidates) != 2 {
+				t.Fatalf("unacknowledged selection published: %+v", loaded)
+			}
+			for _, candidate := range loaded.Candidates {
+				if (candidate.Campaign != first.Campaign && candidate.Campaign != created.Campaign) || candidate.Revision != 0 || candidate.Credits != 0 {
+					t.Fatalf("fabricated recovery candidate: %+v", candidate)
+				}
+			}
+			selected := reopened.processProgress(t.Context(), session.ProgressInput{ID: "choose", Kind: session.SelectCampaign, Campaign: first.Campaign})
+			if selected.Status != session.StorageSucceeded || selected.Campaign != first.Campaign || selected.Snapshot.Credits() != 0 || selected.Snapshot.Data(t.Context()).DebtCents != 0 {
+				t.Fatalf("explicit recovery: %+v", selected)
+			}
+		})
+	}
+}
+
+func TestSelectorFenceRequiresChoiceAfterUncleanExit(t *testing.T) {
+	codec, _, _ := fixture(t)
+	path := t.TempDir()
+	store, err := Open(t.Context(), path, codec, 4, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := newProfileCampaign(t, store)
+	second := newProfileCampaign(t, store)
+	// Model process death without running the orderly worker shutdown.
+	if err := store.listing.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.lock.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.root.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(t.Context(), path, codec, 4, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := reopened.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	loaded := reopened.processProgress(t.Context(), session.ProgressInput{ID: "load", Kind: session.LoadActive})
+	if loaded.Status != session.StorageAmbiguous || loaded.Campaign != "" || loaded.RevisionKnown || len(loaded.Candidates) != 2 {
+		t.Fatalf("unclean exit silently chose a campaign: %+v", loaded)
+	}
+	selected := reopened.processProgress(t.Context(), session.ProgressInput{ID: "choose", Kind: session.SelectCampaign, Campaign: second.Campaign})
+	if selected.Status != session.StorageSucceeded || selected.Campaign != second.Campaign || first.Campaign == second.Campaign || selected.Snapshot.Credits() != 0 {
+		t.Fatalf("explicit choice: %+v", selected)
+	}
+}
+
+func TestSelectorFenceCompatibilityAndCorruption(t *testing.T) {
+	for _, future := range []bool{false, true} {
+		t.Run(fmt.Sprintf("future-%t", future), func(t *testing.T) {
+			store, _, path := profileFixture(t)
+			first := newProfileCampaign(t, store)
+			name := filepath.Join(path, selectorFenceName)
+			original, err := os.ReadFile(name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			damaged := []byte("damaged fence")
+			if future {
+				damaged = []byte(`{"magic":"TBTD-SELECTOR-INTENT","schema":2,"future":true}`)
+			}
+			if err := os.WriteFile(name, damaged, 0600); err != nil {
+				t.Fatal(err)
+			}
+			loaded := store.processProgress(t.Context(), session.ProgressInput{ID: "load", Kind: session.LoadActive})
+			if future {
+				if loaded.Status != session.StorageTooNew {
+					t.Fatalf("future fence treated as corruption: %+v", loaded)
+				}
+				selected := store.processProgress(t.Context(), session.ProgressInput{ID: "select", Kind: session.SelectCampaign, Campaign: first.Campaign})
+				if selected.Status != session.StorageTooNew {
+					t.Fatalf("future fence replaced: %+v", selected)
+				}
+				data, err := os.ReadFile(name)
+				if err != nil || string(data) != string(damaged) {
+					t.Fatalf("future fence changed: %v", err)
+				}
+				if err := os.WriteFile(name, original, 0600); err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			if loaded.Status != session.StorageCorrupt || loaded.Campaign != "" || len(loaded.Candidates) != 1 {
+				t.Fatalf("damaged fence selected a campaign: %+v", loaded)
+			}
+			selected := store.processProgress(t.Context(), session.ProgressInput{ID: "select", Kind: session.SelectCampaign, Campaign: first.Campaign})
+			if selected.Status != session.StorageSucceeded || selected.Campaign != first.Campaign || selected.Snapshot.Credits() != 0 {
+				t.Fatalf("explicit recovery: %+v", selected)
+			}
+			copies, err := filepath.Glob(filepath.Join(path, ".tmp-*.preserved"))
+			if err != nil || len(copies) != 1 {
+				t.Fatalf("damaged fence was not preserved: %v, copies=%d", err, len(copies))
+			}
+			data, err := os.ReadFile(copies[0])
+			if err != nil || string(data) != string(damaged) {
+				t.Fatalf("preserved fence differs: %v", err)
+			}
+		})
 	}
 }
