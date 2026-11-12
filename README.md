@@ -1,6 +1,6 @@
 # too-broke-to-die
 
-TOO BROKE TO DIE is planned as a complete, offline, single-player Go/raylib desktop game for Linux x86-64 and Windows x86-64, with Russian player-facing text. The attached `too-broke-to-die-pdd-linux.md` is the requirements authority; these records summarize it, not replace it. Implementation from `main` has been authorized, but no game implementation or qualification is established by this baseline. A vertical slice is not the finished game.
+TOO BROKE TO DIE is planned as a complete, offline, single-player Go/raylib desktop game for Linux x86-64, with Russian player-facing text. The attached `too-broke-to-die-pdd-linux.md` is the requirements authority subject to the revised Linux-only scope; these records summarize it, not replace it. Implementation from `main` has been authorized, but no game implementation or qualification is established by this baseline. A vertical slice is not the finished game.
 
 - [Requirements](docs/requirements.md): full-game scope and PDD traceability.
 - [Phases](docs/phases.md): ordered dependencies, exits, and progress.
