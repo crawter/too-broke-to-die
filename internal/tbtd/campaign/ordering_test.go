@@ -247,6 +247,52 @@ func TestCriticalItemWithCertificationAndLethalDamage(t *testing.T) {
 	}
 }
 
+func TestFinalCertificationKeepsAnchorWithCriticalItems(t *testing.T) {
+	ctx := context.Background()
+	_, manifest := fixture(t)
+	definition := CriticalItemDefinition{ID: "ITEM-TEST-KEY", AcquireAnchor: "ANC-HOS-01", ConsumeAnchor: "ANC-HOS-02", Route: "OBJ-HOS-RES-GATE"}
+	campaign, err := NewWithInventory(ctx, manifest, []CriticalItemDefinition{definition})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := campaign.Start(ctx, Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot = routeTo99(t, campaign, manifest, snapshot)
+	active, err := campaign.Accept(ctx, snapshot, "D-INS-END")
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := next(active)
+	event.Certification = &CertificationCandidate{Completed: true, Event: candidate(t, manifest, "D-INS-END", 1)}
+	event.CriticalItems = []CriticalItemCandidate{
+		{Item: definition.ID, Action: CriticalAcquire, Completed: true},
+		{Item: definition.ID, Action: CriticalConsume, Completed: true},
+	}
+	event.Death, event.DeathDetail = DeathGameplay, "simultaneous hazard"
+	result := prepare(t, campaign, active, event)
+	data := result.Data(ctx)
+	if data.Anchor != "ANC-INS-OUT" || result.Credits() != 100 || data.Receipts[99].Certification.Deed != "D-INS-END" || data.Consequences[99] != "CON-D-INS-END" || !has(data.Narratives, content.NarrativeID("NAR-09")) || len(data.CriticalItems) != 1 || data.CriticalItems[0].Consumed.Sequence != event.Sequence || debt(t, result) != 4999 {
+		t.Fatalf("final transaction lost an outcome: %+v", data)
+	}
+	routes, err := campaign.ItemRoutes(ctx, result)
+	if err != nil || !reflect.DeepEqual(routes, []content.ObjectID{definition.Route}) {
+		t.Fatalf("lost consumed route: %v %v", routes, err)
+	}
+	if active.Credits() != 99 || len(active.Data(ctx).CriticalItems) != 0 {
+		t.Fatal("proposal changed committed state")
+	}
+	restored, err := campaign.Restore(ctx, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayed := prepare(t, campaign, restored, event)
+	if !reflect.DeepEqual(replayed.Data(ctx), data) {
+		t.Fatal("final transaction replay changed outcome")
+	}
+}
+
 func TestCriticalItemCatalogueAndCandidates(t *testing.T) {
 	ctx := context.Background()
 	_, manifest := fixture(t)
