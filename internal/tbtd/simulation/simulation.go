@@ -28,6 +28,7 @@ type World struct {
 	lethal   []Rect
 	combat   combatState
 	feces    fecesState
+	objects  objectState
 }
 
 // TickInput supplies one actor's velocity and the one-way platform currently
@@ -196,6 +197,9 @@ func NewWorld(ctx context.Context, owner *campaign.Campaign, manifest *content.C
 			case "player_platform":
 				kind = OneWay
 			case "gate":
+				if selected.Deed == plan.ActiveTicket {
+					continue // the attempt's plate controls this gate
+				}
 				kind = Solid
 			case "crusher":
 				continue // timed crusher belongs to hazard execution
@@ -308,6 +312,14 @@ func NewWorld(ctx context.Context, owner *campaign.Campaign, manifest *content.C
 		if entity.Role == content.RoleCamera {
 			world.feces.targets = append(world.feces.targets, FecesTarget{Collider: Collider{ID: string(entity.ID), Kind: ProjectileTarget, Bounds: Rect{X: entity.Position.X - 32, Y: entity.Position.Y - 32, Width: 64, Height: 64}}, Kind: FecesReceptor, Ticket: entity.Ticket})
 		}
+	}
+	if isBay {
+		if err = world.installAuthoredObjects(ctx, rectFromContent(bounds)); err != nil {
+			return nil, err
+		}
+	}
+	if err = world.installAuthoredInteractions(ctx); err != nil {
+		return nil, err
 	}
 	world.previous = cloneState(world.state)
 	return world, nil
