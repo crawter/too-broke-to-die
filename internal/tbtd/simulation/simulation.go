@@ -27,6 +27,7 @@ type World struct {
 	limbs    limbState
 	lethal   []Rect
 	combat   combatState
+	feces    fecesState
 }
 
 // TickInput supplies one actor's velocity and the one-way platform currently
@@ -83,6 +84,12 @@ func NewWorld(ctx context.Context, owner *campaign.Campaign, manifest *content.C
 	}
 	slices.SortFunc(state.Emergencies, func(a, b EmergencyState) int { return compareID(string(a.ID), string(b.ID)) })
 	world := &World{state: state}
+	world.feces.attempt, _ = committed.ActiveAttempt()
+	for _, incident := range committed.Data(ctx).Incidents {
+		if incident.Kind == campaign.IncidentWaste && incident.Deed == world.feces.attempt.Deed && incident.Attempt == world.feces.attempt.Number {
+			world.feces.reported = true
+		}
+	}
 	if plan.Ending != "" && (plan.State == "ST-SCN" || plan.State == "ST-END") {
 		if len(platforms) != 0 {
 			return nil, fmt.Errorf("ending cannot contain combat platforms")
@@ -292,6 +299,14 @@ func NewWorld(ctx context.Context, owner *campaign.Campaign, manifest *content.C
 			if err = world.AddProtectedCivilian(ctx, Civilian{ID: string(entity.ID), Bounds: box}); err != nil {
 				return nil, fmt.Errorf("civilian placement: %w", err)
 			}
+		}
+	}
+	for _, entity := range world.state.Entities {
+		if entity.Role == content.RoleRefill {
+			world.feces.stations = append(world.feces.stations, RefillStation{ID: string(entity.ID), Position: entity.Position, Reporting: plan.Location == "LOC-MIN"})
+		}
+		if entity.Role == content.RoleCamera {
+			world.feces.targets = append(world.feces.targets, FecesTarget{Collider: Collider{ID: string(entity.ID), Kind: ProjectileTarget, Bounds: Rect{X: entity.Position.X - 32, Y: entity.Position.Y - 32, Width: 64, Height: 64}}, Kind: FecesReceptor, Ticket: entity.Ticket})
 		}
 	}
 	world.previous = cloneState(world.state)

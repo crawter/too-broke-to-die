@@ -30,7 +30,7 @@ func (world *World) launchPlayerProjectile(ctx context.Context, attack PlayerAtt
 	}
 	body := world.state.Player.Bounds
 	id := fmt.Sprintf("player-%d", attack.ID)
-	world.combat.projectiles = append(world.combat.projectiles, Projectile{ID: id, Attacker: "player", Attack: fmt.Sprint(attack.ID), Position: Vector{X: centerX(body), Y: centerY(body)}, Velocity: Vector{X: direction.X * 600, Y: direction.Y * 600}, PlayerOwned: true})
+	world.combat.projectiles = append(world.combat.projectiles, Projectile{ID: id, Attacker: "player", Attack: fmt.Sprint(attack.ID), Position: Vector{X: centerX(body), Y: centerY(body)}, Velocity: Vector{X: direction.X * fecesSpeed, Y: direction.Y * fecesSpeed}, PlayerOwned: true})
 }
 
 func (world *World) launchEnemyProjectile(enemy Enemy) {
@@ -47,6 +47,9 @@ func (world *World) launchEnemyProjectile(enemy Enemy) {
 func (world *World) advanceProjectiles(ctx context.Context, playerOwned bool) (_ []DamageHit, err error) {
 	defer mon.Task()(&ctx)(&err)
 	var hits []DamageHit
+	if playerOwned && world.feces.inTick {
+		world.advanceFecesChannel(ctx)
+	}
 	if playerOwned && world.limbs.generation != 0 {
 		if !world.limbs.inTick {
 			return nil, fmt.Errorf("limb-enabled worlds require StepLimbs")
@@ -64,10 +67,10 @@ func (world *World) advanceProjectiles(ctx context.Context, playerOwned bool) (_
 			remaining = append(remaining, projectile)
 			continue
 		}
-		if projectile.PlayerOwned {
-			projectile.Velocity.Y -= 1400 * TickSeconds
-		}
 		delta := Vector{X: projectile.Velocity.X * TickSeconds, Y: projectile.Velocity.Y * TickSeconds}
+		if projectile.PlayerOwned {
+			delta = fecesStep(&projectile.Velocity)
+		}
 		var targets []Collider
 		for index, area := range world.combat.protection {
 			if validRect(area, false) {
@@ -75,6 +78,11 @@ func (world *World) advanceProjectiles(ctx context.Context, playerOwned bool) (_
 			}
 		}
 		if projectile.PlayerOwned {
+			if world.feces.inTick {
+				for _, target := range world.feces.targets {
+					targets = append(targets, target.Collider)
+				}
+			}
 			for _, enemy := range world.combat.enemies {
 				if enemy.Health > 0 {
 					targets = append(targets, Collider{ID: "combat-enemy:" + enemy.ID, Kind: ProjectileTarget, Bounds: enemy.Body.Bounds})
@@ -97,6 +105,10 @@ func (world *World) advanceProjectiles(ctx context.Context, playerOwned bool) (_
 			projectile.Position.Y += delta.Y
 			remaining = append(remaining, projectile)
 			continue
+		}
+		if projectile.PlayerOwned && world.feces.inTick {
+			position := Vector{X: projectile.Position.X + delta.X*impact.Time, Y: projectile.Position.Y + delta.Y*impact.Time}
+			world.fecesImpact(projectile, impact, position)
 		}
 		if impact.Collider.ID == "combat-player" {
 			direction := 1
