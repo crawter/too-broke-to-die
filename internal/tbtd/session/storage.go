@@ -72,6 +72,11 @@ type ProgressInput struct {
 	// exact candidate revision for LoadRevision. Other operations leave it zero.
 	ExpectedRevision uint64
 
+	// ExpectedDigest is the selected predecessor's payload digest captured when
+	// the proposal was prepared. The store validates it before writing; retries
+	// and resolution must retain it rather than re-reading the current slot.
+	ExpectedDigest string
+
 	Operation OperationID
 
 	Proposal campaign.Snapshot
