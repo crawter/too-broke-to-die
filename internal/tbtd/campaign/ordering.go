@@ -140,6 +140,33 @@ const (
 	DeathUnclean DeathCause = "unclean_termination"
 )
 
+// StoryAction identifies a durable, named narrative transition.
+type StoryAction string
+
+const (
+	// StoryNarrative completes an independent prologue or arrival milestone.
+	StoryNarrative StoryAction = "narrative"
+
+	// StoryPermit issues the unique subsidized permit after the ledger is complete.
+	StoryPermit StoryAction = "permit"
+
+	// StoryConsent commits confirmed final-death consent and enters the ending.
+	StoryConsent StoryAction = "consent"
+
+	// StoryEnding completes the named ending scene or acknowledges the tableau.
+	StoryEnding StoryAction = "ending"
+)
+
+// StoryChange carries only the identity appropriate to its action. A canceled
+// consent prompt produces no operation and is handled by ConsentDecision.
+type StoryChange struct {
+	Action StoryAction `json:"action"`
+
+	Narrative content.NarrativeID `json:"narrative,omitempty"`
+
+	Stage EndingStage `json:"stage,omitempty"`
+}
+
 // Transition is one immutable request. Sequence starts at one and is assigned
 // only once; retries must reuse this request and its campaign identity.
 // Contacts and failure are evaluated against the attempt active at the start
@@ -150,6 +177,10 @@ type Transition struct {
 	Sequence uint64 `json:"sequence"`
 
 	Attempt *AttemptChange `json:"attempt,omitempty"`
+
+	Story *StoryChange `json:"story,omitempty"`
+
+	Checkpoint content.AnchorID `json:"checkpoint,omitempty"`
 
 	Certification *CertificationCandidate `json:"certification,omitempty"`
 
@@ -177,6 +208,9 @@ func (campaign *Campaign) Prepare(ctx context.Context, snapshot Snapshot, transi
 	if err = campaign.Validate(ctx, snapshot); err != nil {
 		return Snapshot{}, err
 	}
+	if snapshot.data.Consent && transition.Story == nil {
+		return Snapshot{}, fmt.Errorf("%w: ending has begun", ErrBlocked)
+	}
 	if !campaignIDPattern.MatchString(transition.CampaignID) || transition.Sequence == 0 || (snapshot.data.CampaignID != "" && snapshot.data.CampaignID != transition.CampaignID) {
 		return Snapshot{}, fmt.Errorf("%w: campaign or operation identity", ErrInvalid)
 	}
@@ -198,6 +232,19 @@ func (campaign *Campaign) Prepare(ctx context.Context, snapshot Snapshot, transi
 	}
 	if snapshot.data.OperationSequence == math.MaxUint64 || transition.Sequence != snapshot.data.OperationSequence+1 {
 		return Snapshot{}, fmt.Errorf("%w: stale or nonconsecutive operation", ErrConflict)
+	}
+	if transition.Story != nil || transition.Checkpoint != "" {
+		if (transition.Story != nil && transition.Checkpoint != "") || transition.Attempt != nil || transition.Certification != nil || len(transition.CriticalItems) != 0 || transition.Encounter != nil || transition.Aftermath != "" || len(transition.Contacts) != 0 || transition.Failure || transition.Death != DeathNone || transition.DeathDetail != "" {
+			return Snapshot{}, fmt.Errorf("%w: story or checkpoint change must be a separate operation", ErrInvalid)
+		}
+		if transition.Story != nil {
+			return campaign.prepareStory(ctx, snapshot, transition, digest)
+		}
+		proposed, checkpointErr := campaign.Checkpoint(ctx, snapshot, transition.Checkpoint)
+		if checkpointErr != nil {
+			return Snapshot{}, checkpointErr
+		}
+		return campaign.recordNamedOperation(ctx, snapshot, proposed, transition, digest)
 	}
 	if transition.Failure && transition.Certification != nil && transition.Certification.Completed {
 		return Snapshot{}, fmt.Errorf("%w: completed and failed attempt", ErrInvalid)
@@ -261,6 +308,23 @@ func (campaign *Campaign) Prepare(ctx context.Context, snapshot Snapshot, transi
 		if err = campaign.applyCriticalItem(ctx, &data, candidate, id); err != nil {
 			return Snapshot{}, err
 		}
+		if candidate.Completed {
+			anchor := campaign.items[candidate.Item].AcquireAnchor
+			if candidate.Action == CriticalConsume {
+				anchor = campaign.items[candidate.Item].ConsumeAnchor
+			}
+			if strings.HasPrefix(string(anchor), "ANC-HOS-") && !has(data.Narratives, content.NarrativeID("NAR-04")) {
+				data.Narratives = append(data.Narratives, "NAR-04")
+			}
+			if strings.HasPrefix(string(anchor), "ANC-INS-") && !has(data.Narratives, content.NarrativeID("NAR-08")) {
+				data.Narratives = append(data.Narratives, "NAR-08")
+			}
+		}
+	}
+	// The final certification has a specifically authored recovery anchor. Item
+	// actions in the same operation must not replace its atomic outcome.
+	if transition.Certification != nil && transition.Certification.Completed && transition.Certification.Event.Deed == "D-INS-END" && receiptIndex(snapshot.data.Receipts, "D-INS-END") < 0 {
+		data.Anchor = "ANC-INS-OUT"
 	}
 	if transition.Aftermath != "" {
 		if err = advanceEmergency(ctx, &data, transition.Aftermath); err != nil {
@@ -293,6 +357,10 @@ func (campaign *Campaign) Prepare(ctx context.Context, snapshot Snapshot, transi
 	}
 	data.CampaignID = transition.CampaignID
 	data.OperationSequence = transition.Sequence
+	data.DebtCents, err = (Snapshot{data: data}).Debt(ctx)
+	if err != nil {
+		return Snapshot{}, err
+	}
 	resultDigest, err := digestState(ctx, data)
 	if err != nil {
 		return Snapshot{}, err

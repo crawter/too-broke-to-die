@@ -69,8 +69,17 @@ func (campaign *Campaign) Start(ctx context.Context, snapshot Snapshot) (_ Snaps
 		return Snapshot{}, err
 	}
 	data := snapshot.Data(ctx)
-	if !has(data.Narratives, content.NarrativeID("NAR-03")) {
-		data.Narratives = append(data.Narratives, "NAR-03")
+	if data.Consent {
+		return Snapshot{}, fmt.Errorf("%w: ending has begun", ErrBlocked)
+	}
+	// Start is the legacy shortcut for completing the three prologue scenes.
+	if data.Anchor != "" && len(data.Narratives) < 3 {
+		data.Anchor = "ANC-PRO-03"
+	}
+	for _, id := range []content.NarrativeID{"NAR-01", "NAR-02", "NAR-03"} {
+		if !has(data.Narratives, id) {
+			data.Narratives = append(data.Narratives, id)
+		}
 	}
 	return Snapshot{data: data}, nil
 }
@@ -87,6 +96,9 @@ func (campaign *Campaign) Accept(ctx context.Context, snapshot Snapshot, id cont
 		return Snapshot{}, fmt.Errorf("%w: unknown deed %s", ErrInvalid, id)
 	}
 	data := snapshot.Data(ctx)
+	if data.Consent {
+		return Snapshot{}, fmt.Errorf("%w: ending has begun", ErrBlocked)
+	}
 	if data.Active != "" && data.Active != id {
 		return Snapshot{}, fmt.Errorf("%w: active %s", ErrBlocked, data.Active)
 	}
@@ -98,6 +110,16 @@ func (campaign *Campaign) Accept(ctx context.Context, snapshot Snapshot, id cont
 	}
 	if data.Active == id {
 		return Snapshot{data: data}, nil
+	}
+	// Entering the first and last institutions records their arrival scenes.
+	if deed.Location == "LOC-HOS" && !has(data.Narratives, content.NarrativeID("NAR-04")) {
+		data.Narratives = append(data.Narratives, "NAR-04")
+	}
+	if deed.Location == "LOC-INS" && !has(data.Narratives, content.NarrativeID("NAR-08")) {
+		data.Narratives = append(data.Narratives, "NAR-08")
+	}
+	if data.Anchor == "" {
+		data.Anchor = deed.Deed.Anchor
 	}
 	for i := range data.Attempts {
 		if data.Attempts[i].Deed == id {
@@ -122,6 +144,9 @@ func (campaign *Campaign) Reset(ctx context.Context, snapshot Snapshot) (_ Snaps
 		return Snapshot{}, err
 	}
 	data := snapshot.Data(ctx)
+	if data.Consent {
+		return Snapshot{}, fmt.Errorf("%w: ending has begun", ErrBlocked)
+	}
 	if data.Active == "" {
 		return Snapshot{}, fmt.Errorf("%w: no active ticket", ErrBlocked)
 	}
@@ -148,6 +173,9 @@ func (campaign *Campaign) Abandon(ctx context.Context, snapshot Snapshot) (_ Sna
 		return Snapshot{}, err
 	}
 	data := snapshot.Data(ctx)
+	if data.Consent {
+		return Snapshot{}, fmt.Errorf("%w: ending has begun", ErrBlocked)
+	}
 	for i := range data.Attempts {
 		if data.Attempts[i].Deed == data.Active {
 			data.Attempts[i].Failed = ""
@@ -164,6 +192,9 @@ func (campaign *Campaign) DefeatBoss(ctx context.Context, snapshot Snapshot, id 
 		return Snapshot{}, err
 	}
 	data := snapshot.Data(ctx)
+	if data.Consent {
+		return Snapshot{}, fmt.Errorf("%w: ending has begun", ErrBlocked)
+	}
 	var closure content.CampaignDeed
 	found := false
 	for _, deed := range campaign.ordered {
@@ -204,6 +235,9 @@ func (campaign *Campaign) Apply(ctx context.Context, snapshot Snapshot, event Ce
 		return Snapshot{}, Receipt{}, fmt.Errorf("%w: unknown deed %s", ErrInvalid, event.Deed)
 	}
 	data := snapshot.Data(ctx)
+	if data.Consent {
+		return Snapshot{}, Receipt{}, fmt.Errorf("%w: ending has begun", ErrBlocked)
+	}
 	if index := receiptIndex(data.Receipts, event.Deed); index >= 0 {
 		receipt := data.Receipts[index]
 		if !sameCertification(receipt.Certification, event) {
@@ -232,6 +266,12 @@ func (campaign *Campaign) Apply(ctx context.Context, snapshot Snapshot, event Ce
 	data.Anchor = deed.Deed.Anchor
 	if deed.CompletedNarrative != "" {
 		data.Narratives = append(data.Narratives, deed.CompletedNarrative)
+	}
+	switch deed.Deed.ID {
+	case "D-CHU-END":
+		data.Narratives = append(data.Narratives, "NAR-06")
+	case "D-MIN-END":
+		data.Narratives = append(data.Narratives, "NAR-07")
 	}
 	for _, batch := range campaign.batches {
 		if has(batch.Deeds, event.Deed) && batchComplete(batch, data.Receipts) {

@@ -53,6 +53,8 @@ type State struct {
 
 	Incidents []Incident `json:"incidents"`
 
+	DebtCents int64 `json:"debt_cents"`
+
 	CriticalItems []CriticalItemRecord `json:"critical_items"`
 
 	CampaignID string `json:"campaign_id,omitempty"`
@@ -66,6 +68,12 @@ type State struct {
 	Permit bool `json:"permit"`
 
 	Consent bool `json:"consent"`
+
+	Ending EndingStage `json:"ending"`
+
+	TableauAcknowledged bool `json:"tableau_acknowledged"`
+
+	Completed bool `json:"completed"`
 }
 
 // Snapshot owns its state; exported values are obtained only as deep copies.
@@ -130,12 +138,15 @@ func (campaign *Campaign) Validate(ctx context.Context, snapshot Snapshot) (err 
 	if err = campaign.validateIncidents(ctx, data); err != nil {
 		return err
 	}
-	seenNarratives := map[content.NarrativeID]bool{}
-	for _, id := range data.Narratives {
-		if (id != "NAR-03" && id != "NAR-05" && id != "NAR-09") || seenNarratives[id] {
-			return fmt.Errorf("%w: narrative %s", ErrInvalid, id)
-		}
-		seenNarratives[id] = true
+	debt, err := snapshot.Debt(ctx)
+	if err != nil {
+		return err
+	}
+	if debt != data.DebtCents {
+		return fmt.Errorf("%w: debt does not match incident history", ErrInvalid)
+	}
+	if err = campaign.validateStory(ctx, data); err != nil {
+		return err
 	}
 	seenBosses := map[content.EncounterID]bool{}
 	for _, id := range data.Defeated {
@@ -191,20 +202,21 @@ func (campaign *Campaign) Validate(ctx context.Context, snapshot Snapshot) (err 
 			return fmt.Errorf("%w: emergency %s", ErrInvalid, actual.ID)
 		}
 	}
-	if seenNarratives["NAR-05"] != (receiptIndex(data.Receipts, "D-HOS-END") >= 0) || seenNarratives["NAR-09"] != (receiptIndex(data.Receipts, "D-INS-END") >= 0) {
-		return fmt.Errorf("%w: closure narrative", ErrInvalid)
-	}
 	if data.Active != "" {
 		deed, ok := campaign.deeds[data.Active]
 		if !ok || !seenAttempts[data.Active] || receiptIndex(data.Receipts, data.Active) >= 0 || len(missingDeed(deed.Deed, data)) != 0 {
 			return fmt.Errorf("%w: active %s", ErrInvalid, data.Active)
 		}
 	}
-	if (data.Permit && (len(data.Receipts) != 100 || !seenNarratives["NAR-09"])) || (data.Consent && !data.Permit) {
-		return fmt.Errorf("%w: ending flags", ErrInvalid)
-	}
 	if data.Anchor != "" {
-		valid := false
+		valid := (data.Anchor == "ANC-PRO-01" && len(data.Narratives) == 0) ||
+			(data.Anchor == "ANC-PRO-02" && has(data.Narratives, content.NarrativeID("NAR-01")) && !has(data.Narratives, content.NarrativeID("NAR-02"))) ||
+			(data.Anchor == "ANC-PRO-03" && has(data.Narratives, content.NarrativeID("NAR-02"))) ||
+			(data.Anchor == "ANC-HOS-01" && has(data.Narratives, content.NarrativeID("NAR-04"))) ||
+			(data.Anchor == "ANC-INS-01" && has(data.Narratives, content.NarrativeID("NAR-08"))) ||
+			(data.Anchor == "ANC-MIN-PERMIT" && data.Permit) ||
+			(data.Consent && data.Anchor == endingAnchor(data.Ending)) ||
+			campaign.reachableEncounterAnchor(ctx, data, data.Anchor)
 		for _, receipt := range data.Receipts {
 			if receipt.Anchor == data.Anchor {
 				valid = true
@@ -224,7 +236,7 @@ func (campaign *Campaign) Validate(ctx context.Context, snapshot Snapshot) (err 
 		if !valid {
 			return fmt.Errorf("%w: anchor %s", ErrInvalid, data.Anchor)
 		}
-	} else if len(data.Receipts) != 0 || len(data.Defeated) != 0 || len(data.CriticalItems) != 0 {
+	} else if data.Active != "" || len(data.Receipts) != 0 || len(data.Defeated) != 0 || len(data.CriticalItems) != 0 || (len(data.Narratives) != 0 && len(data.Narratives) != 3) {
 		return fmt.Errorf("%w: missing anchor", ErrInvalid)
 	}
 	return nil
