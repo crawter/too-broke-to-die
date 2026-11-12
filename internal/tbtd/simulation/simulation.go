@@ -25,6 +25,7 @@ type World struct {
 	previous State
 	motion   playerMotion
 	lethal   []Rect
+	combat   combatState
 }
 
 // TickInput supplies one actor's velocity and the one-way platform currently
@@ -168,6 +169,7 @@ func NewWorld(ctx context.Context, owner *campaign.Campaign, manifest *content.C
 		if selected == nil {
 			return nil, fmt.Errorf("missing bay %s", room.Encounter)
 		}
+		world.combat.protection = append(world.combat.protection, rectFromContent(selected.Safety.VestibuleProtect), rectFromContent(selected.Safety.RefugeProtect))
 		bounds = content.Rect{X: 0, Y: -8, Width: selected.Template.Width, Height: selected.Template.Height + 8}
 		floor = selected.Template.Floor
 		spawn = content.GeometryPoint{X: 96, Y: 0}
@@ -272,6 +274,24 @@ func NewWorld(ctx context.Context, owner *campaign.Campaign, manifest *content.C
 	}
 	if world.state.Player.Support == "" {
 		return nil, fmt.Errorf("anchor %s has no support", plan.Anchor)
+	}
+	for _, entity := range world.state.Entities {
+		if entity.Kind == "MELEE" || entity.Kind == "RANGED" {
+			kind := EnemyKind(entity.Kind)
+			if plan.Location == "LOC-INS" && kind == MeleeEnemy {
+				kind = FollowerEnemy
+			}
+			box := Rect{X: entity.Position.X - PlayerWidth/2, Y: entity.Position.Y, Width: PlayerWidth, Height: PlayerHeight}
+			if err = world.AddEnemy(ctx, string(entity.ID), kind, box); err != nil {
+				return nil, fmt.Errorf("enemy placement: %w", err)
+			}
+		}
+		if entity.Role == content.RoleActor {
+			box := Rect{X: entity.Position.X - PlayerWidth/2, Y: entity.Position.Y, Width: PlayerWidth, Height: PlayerHeight}
+			if err = world.AddProtectedCivilian(ctx, Civilian{ID: string(entity.ID), Bounds: box}); err != nil {
+				return nil, fmt.Errorf("civilian placement: %w", err)
+			}
+		}
 	}
 	world.previous = cloneState(world.state)
 	return world, nil
