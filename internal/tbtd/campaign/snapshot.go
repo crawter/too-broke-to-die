@@ -1,0 +1,191 @@
+// Copyright (C) 2026 crawter
+// All rights reserved.
+
+package campaign
+
+import (
+	"context"
+	"fmt"
+	"slices"
+
+	"too-broke-to-die/internal/tbtd/content"
+)
+
+// Attempt identifies the latest accepted attempt for a ticket.
+type Attempt struct {
+	Deed content.DeedID `json:"deed"`
+
+	Number uint64 `json:"number"`
+}
+
+// Emergency records the committed start of a shared batch emergency. Later
+// consequence transitions may advance its stage after durable acknowledgement.
+type Emergency struct {
+	ID content.EmergencyID `json:"id"`
+
+	Stage string `json:"stage"`
+}
+
+// EmergencyActive is the stage committed with a batch's sixth receipt.
+const EmergencyActive = "active"
+
+// State is the serializable campaign portion implemented here. It has no
+// credit counter; credit is derived exclusively from validated receipts.
+type State struct {
+	Receipts []Receipt `json:"receipts"`
+
+	Attempts []Attempt `json:"attempts"`
+
+	Active content.DeedID `json:"active"`
+
+	Narratives []content.NarrativeID `json:"narratives"`
+
+	Defeated []content.EncounterID `json:"defeated"`
+
+	Consequences []content.ConsequenceID `json:"consequences"`
+
+	Emergencies []Emergency `json:"emergencies"`
+
+	Anchor content.AnchorID `json:"anchor"`
+
+	Permit bool `json:"permit"`
+
+	Consent bool `json:"consent"`
+}
+
+// Snapshot owns its state; exported values are obtained only as deep copies.
+// Its zero value is an empty campaign.
+type Snapshot struct{ data State }
+
+// Data returns an independent serializable copy.
+func (snapshot Snapshot) Data(ctx context.Context) State {
+	defer mon.Task()(&ctx)(nil)
+	data := snapshot.data
+	data.Receipts = make([]Receipt, len(snapshot.data.Receipts))
+	for i, receipt := range snapshot.data.Receipts {
+		data.Receipts[i] = cloneReceipt(receipt)
+	}
+	data.Attempts = slices.Clone(data.Attempts)
+	data.Narratives = slices.Clone(data.Narratives)
+	data.Defeated = slices.Clone(data.Defeated)
+	data.Consequences = slices.Clone(data.Consequences)
+	data.Emergencies = slices.Clone(data.Emergencies)
+	return data
+}
+
+// Credits is the number of committed receipt identities, not a stored balance.
+func (snapshot Snapshot) Credits() int { return len(snapshot.data.Receipts) }
+
+// Restore validates decoded data before returning an isolated snapshot. It does
+// not perform filesystem recovery or claim the supplied data is durable.
+func (campaign *Campaign) Restore(ctx context.Context, state State) (_ Snapshot, err error) {
+	defer mon.Task()(&ctx)(&err)
+	candidate := Snapshot{data: state}
+	candidate = Snapshot{data: candidate.Data(ctx)}
+	if err = campaign.Validate(ctx, candidate); err != nil {
+		return Snapshot{}, err
+	}
+	return candidate, nil
+}
+
+// Validate checks receipt membership, chronology and the bindings this package owns.
+func (campaign *Campaign) Validate(ctx context.Context, snapshot Snapshot) (err error) {
+	defer mon.Task()(&ctx)(&err)
+	data := snapshot.data
+	if len(data.Receipts) > len(campaign.deeds) {
+		return fmt.Errorf("%w: too many receipts", ErrInvalid)
+	}
+	seenAttempts := map[content.DeedID]bool{}
+	for _, attempt := range data.Attempts {
+		if _, ok := campaign.deeds[attempt.Deed]; !ok || seenAttempts[attempt.Deed] || attempt.Number == 0 {
+			return fmt.Errorf("%w: attempt %s", ErrInvalid, attempt.Deed)
+		}
+		seenAttempts[attempt.Deed] = true
+	}
+	seenNarratives := map[content.NarrativeID]bool{}
+	for _, id := range data.Narratives {
+		if (id != "NAR-03" && id != "NAR-05" && id != "NAR-09") || seenNarratives[id] {
+			return fmt.Errorf("%w: narrative %s", ErrInvalid, id)
+		}
+		seenNarratives[id] = true
+	}
+	seenBosses := map[content.EncounterID]bool{}
+	for _, id := range data.Defeated {
+		var closure content.CampaignDeed
+		found := false
+		for _, deed := range campaign.ordered {
+			if deed.Family == "END" && deed.Deed.Encounter == id {
+				closure, found = deed, true
+				break
+			}
+		}
+		if !found || seenBosses[id] {
+			return fmt.Errorf("%w: boss %s", ErrInvalid, id)
+		}
+		seenBosses[id] = true
+		for _, required := range closure.Deed.Prerequisites {
+			if receiptIndex(data.Receipts, required) < 0 {
+				return fmt.Errorf("%w: boss %s missing %s", ErrInvalid, id, required)
+			}
+		}
+	}
+	prefix := State{Narratives: data.Narratives, Defeated: data.Defeated}
+	var consequences []content.ConsequenceID
+	var emergencies []Emergency
+	for i, receipt := range data.Receipts {
+		deed, ok := campaign.deeds[receipt.Certification.Deed]
+		if !ok || receiptIndex(prefix.Receipts, receipt.Certification.Deed) >= 0 || receipt.Ordinal != i+1 {
+			return fmt.Errorf("%w: receipt %s at %d", ErrInvalid, receipt.Certification.Deed, i+1)
+		}
+		if len(missingDeed(deed.Deed, prefix)) != 0 {
+			return fmt.Errorf("%w: out-of-order receipt %s", ErrInvalid, deed.Deed.ID)
+		}
+		if receipt.Title != deed.Title || receipt.TitleID != deed.Deed.Title || receipt.Institution != deed.Location || receipt.InstitutionName != deed.InstitutionName || receipt.Anchor != deed.Deed.Anchor || receipt.Consequence != deed.Deed.Consequence || receipt.Certification.Attempt == 0 || receipt.Certification.Attempt != attemptNumber(data.Attempts, deed.Deed.ID) {
+			return fmt.Errorf("%w: receipt bindings %s", ErrInvalid, deed.Deed.ID)
+		}
+		if err = campaign.checkEvidence(deed, receipt.Certification); err != nil {
+			return err
+		}
+		prefix.Receipts = append(prefix.Receipts, receipt)
+		consequences = append(consequences, deed.Deed.Consequence)
+		for _, batch := range campaign.batches {
+			if has(batch.Deeds, deed.Deed.ID) && batchComplete(batch, prefix.Receipts) {
+				emergencies = append(emergencies, Emergency{ID: batch.Emergency.ID, Stage: EmergencyActive})
+			}
+		}
+	}
+	if !slices.Equal(consequences, data.Consequences) || !slices.Equal(emergencies, data.Emergencies) {
+		return fmt.Errorf("%w: consequence or emergency bindings", ErrInvalid)
+	}
+	if seenNarratives["NAR-05"] != (receiptIndex(data.Receipts, "D-HOS-END") >= 0) || seenNarratives["NAR-09"] != (receiptIndex(data.Receipts, "D-INS-END") >= 0) {
+		return fmt.Errorf("%w: closure narrative", ErrInvalid)
+	}
+	if data.Active != "" {
+		deed, ok := campaign.deeds[data.Active]
+		if !ok || !seenAttempts[data.Active] || receiptIndex(data.Receipts, data.Active) >= 0 || len(missingDeed(deed.Deed, data)) != 0 {
+			return fmt.Errorf("%w: active %s", ErrInvalid, data.Active)
+		}
+	}
+	if (data.Permit && (len(data.Receipts) != 100 || !seenNarratives["NAR-09"])) || (data.Consent && !data.Permit) {
+		return fmt.Errorf("%w: ending flags", ErrInvalid)
+	}
+	if data.Anchor != "" {
+		valid := false
+		for _, receipt := range data.Receipts {
+			if receipt.Anchor == data.Anchor {
+				valid = true
+			}
+		}
+		for _, id := range data.Defeated {
+			if data.Anchor == content.AnchorID("ANC-"+string(id)[4:]) {
+				valid = true
+			}
+		}
+		if !valid {
+			return fmt.Errorf("%w: anchor %s", ErrInvalid, data.Anchor)
+		}
+	} else if len(data.Receipts) != 0 || len(data.Defeated) != 0 {
+		return fmt.Errorf("%w: missing anchor", ErrInvalid)
+	}
+	return nil
+}
