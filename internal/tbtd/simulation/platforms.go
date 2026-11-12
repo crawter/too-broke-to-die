@@ -61,7 +61,7 @@ func (budget *contactBudget) move(ctx context.Context, grid *Grid, box Rect, del
 
 // reversePlatform tries the opposite movement from the original position. A
 // standing rider is carried only if the reverse path is also clear.
-func (world *World) reversePlatform(ctx context.Context, index int, delta Vector, carry bool, budget *contactBudget) (err error) {
+func (world *World) reversePlatform(ctx context.Context, index int, delta Vector, carry bool, budget *contactBudget, trace *[]movementSegment) (err error) {
 	defer mon.Task()(&ctx)(&err)
 	platform := &world.state.Platforms[index]
 	platform.Velocity.X = -platform.Velocity.X
@@ -82,6 +82,7 @@ func (world *World) reversePlatform(ctx context.Context, index int, delta Vector
 		if budget.limited || !sameDisplacement(body.Bounds, result.Bounds, delta) {
 			return nil
 		}
+		*trace = append(*trace, result.segments...)
 		body.Bounds = result.Bounds
 	} else if _, touched := impactTime(platform.Collider.Bounds, delta, Collider{ID: body.ID, Bounds: body.Bounds, Kind: Solid}); touched {
 		return nil
@@ -93,7 +94,7 @@ func (world *World) reversePlatform(ctx context.Context, index int, delta Vector
 // advancePlatforms runs before the actor's own movement. It reverses a
 // non-crusher when carrying or pushing would trap the player. Platform motion
 // is never added to the rider's own velocity.
-func (world *World) advancePlatforms(ctx context.Context, budget *contactBudget) (err error) {
+func (world *World) advancePlatforms(ctx context.Context, budget *contactBudget, trace *[]movementSegment) (err error) {
 	defer mon.Task()(&ctx)(&err)
 	body := &world.state.Player
 	platforms := world.state.Platforms
@@ -114,7 +115,7 @@ func (world *World) advancePlatforms(ctx context.Context, budget *contactBudget)
 				delta.Y *= hit.Time
 			} else {
 				carry := body.Support == platform.Collider.ID && body.DropThrough != platform.Collider.ID
-				if err = world.reversePlatform(ctx, i, delta, carry, budget); err != nil {
+				if err = world.reversePlatform(ctx, i, delta, carry, budget, trace); err != nil {
 					return err
 				}
 				if budget.limited {
@@ -156,9 +157,10 @@ func (world *World) advancePlatforms(ctx context.Context, budget *contactBudget)
 			if !sameDisplacement(body.Bounds, result.Bounds, push) {
 				if platform.Crusher {
 					body.Crushed = true
+					*trace = append(*trace, result.segments...)
 					body.Bounds = result.Bounds
 					platform.Collider.Bounds = moved(platform.Collider.Bounds, delta)
-				} else if err = world.reversePlatform(ctx, i, delta, carry, budget); err != nil {
+				} else if err = world.reversePlatform(ctx, i, delta, carry, budget, trace); err != nil {
 					return err
 				}
 				if budget.limited {
@@ -166,6 +168,7 @@ func (world *World) advancePlatforms(ctx context.Context, budget *contactBudget)
 				}
 				continue
 			}
+			*trace = append(*trace, result.segments...)
 			body.Bounds = result.Bounds
 		}
 		platform.Collider.Bounds = moved(platform.Collider.Bounds, delta)
@@ -196,11 +199,19 @@ func (world *World) validDrop(id string) bool {
 // Step advances exactly one 1/120-second tick; errors leave the world unchanged.
 func (world *World) Step(ctx context.Context, input TickInput) (err error) {
 	defer mon.Task()(&ctx)(&err)
+	_, err = world.stepWithTrace(ctx, input)
+	return err
+}
+
+// stepWithTrace returns only committed actor travel, in platform-then-actor
+// order. Failed platform attempts are not part of the authoritative path.
+func (world *World) stepWithTrace(ctx context.Context, input TickInput) (_ []movementSegment, err error) {
+	defer mon.Task()(&ctx)(&err)
 	if world == nil || world.grid == nil || !world.state.HasPlayer || world.state.Player.Crushed || !validVector(input.Velocity) || !world.validDrop(input.DropThrough) {
-		return fmt.Errorf("invalid gameplay tick")
+		return nil, fmt.Errorf("invalid gameplay tick")
 	}
 	if err = ctx.Err(); err != nil {
-		return err
+		return nil, err
 	}
 	before := cloneState(world.state)
 	defer func() {
@@ -212,26 +223,28 @@ func (world *World) Step(ctx context.Context, input TickInput) (err error) {
 	world.state.Player.Velocity = input.Velocity
 	world.state.Player.DropThrough = input.DropThrough
 	budget := contactBudget{remaining: maxBlockingContacts}
-	if err = world.advancePlatforms(ctx, &budget); err != nil {
-		return err
+	trace := []movementSegment{{from: world.state.Player.Bounds, to: world.state.Player.Bounds}}
+	if err = world.advancePlatforms(ctx, &budget, &trace); err != nil {
+		return nil, err
 	}
 	body := &world.state.Player
 	if budget.limited {
 		world.state.Diagnostics = append(world.state.Diagnostics, Diagnostic{Name: CollisionIterationLimit, Encounter: world.state.Encounter, Entity: body.ID})
 		world.finishTick(before)
-		return nil
+		return trace, nil
 	}
 	if body.Crushed {
 		body.Velocity = Vector{}
 		body.Support = ""
 		world.finishTick(before)
-		return nil
+		return trace, nil
 	}
 	delta := Vector{X: input.Velocity.X * TickSeconds, Y: input.Velocity.Y * TickSeconds}
 	result, err := budget.move(ctx, world.grid, body.Bounds, delta, otherPlatforms(world.state.Platforms, "", input.DropThrough), input.DropThrough)
 	if err != nil {
-		return err
+		return nil, err
 	}
+	trace = append(trace, result.segments...)
 	body.Bounds = result.Bounds
 	for _, contact := range result.Contacts {
 		if contact.Normal.X != 0 {
@@ -248,11 +261,11 @@ func (world *World) Step(ctx context.Context, input TickInput) (err error) {
 	if body.Velocity.Y <= 0 {
 		body.Support, err = world.grid.Support(ctx, body.Bounds, otherPlatforms(world.state.Platforms, "", input.DropThrough), input.DropThrough)
 		if err != nil {
-			return err
+			return nil, err
 		}
 	}
 	world.finishTick(before)
-	return nil
+	return trace, nil
 }
 
 // finishTick is measured by Step.
