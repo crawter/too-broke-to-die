@@ -19,7 +19,11 @@ type Projectile struct {
 	PlayerOwned bool
 }
 
-func (world *World) launchPlayerProjectile(attack PlayerAttack) {
+func (world *World) launchPlayerProjectile(ctx context.Context, attack PlayerAttack) {
+	defer mon.Task()(&ctx)(nil)
+	if world.releaseLimbProjectile(ctx, attack) {
+		return
+	}
 	direction := world.combat.aim
 	if direction == (Vector{}) {
 		direction = Vector{X: float64(attack.Facing)}
@@ -43,6 +47,17 @@ func (world *World) launchEnemyProjectile(enemy Enemy) {
 func (world *World) advanceProjectiles(ctx context.Context, playerOwned bool) (_ []DamageHit, err error) {
 	defer mon.Task()(&ctx)(&err)
 	var hits []DamageHit
+	if playerOwned && world.limbs.generation != 0 {
+		if !world.limbs.inTick {
+			return nil, fmt.Errorf("limb-enabled worlds require StepLimbs")
+		}
+		if err = world.advanceLimbActions(ctx); err != nil {
+			return nil, err
+		}
+		if err = world.advanceLimbProjectiles(ctx); err != nil {
+			return nil, err
+		}
+	}
 	remaining := make([]Projectile, 0, len(world.combat.projectiles))
 	for _, projectile := range world.combat.projectiles {
 		if projectile.PlayerOwned != playerOwned {

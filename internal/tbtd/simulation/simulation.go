@@ -24,6 +24,7 @@ type World struct {
 	state    State
 	previous State
 	motion   playerMotion
+	limbs    limbState
 	lethal   []Rect
 	combat   combatState
 }
