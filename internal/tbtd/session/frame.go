@@ -80,13 +80,19 @@ type MenuSelection struct {
 // from a monotonic clock, not an absolute timestamp. Edges remain ordered.
 // Values update the named controls; omitted values retain their last sample.
 // The sampler must report zero for released controls, including after focus
-// returns, so the session can safely enforce release-before-Resume.
+// returns, so the session can safely enforce release-before-Resume. ResumeBlocked
+// is sampled every frame and reports quarantined physical controls separately
+// from actionable values and edges.
 type FrameInput struct {
 	Elapsed time.Duration
 
 	Values []ActionValue
 
 	Edges []ActionEdge
+
+	// ResumeBlocked reports a held quarantined control that cannot trigger
+	// until release. It must not participate in action-edge deduplication.
+	ResumeBlocked bool
 
 	Focus FocusChange
 
