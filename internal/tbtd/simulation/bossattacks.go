@@ -4,9 +4,19 @@
 package simulation
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"io/fs"
+	"math"
 	"slices"
+	"strings"
+	"unicode/utf8"
+
+	"too-broke-to-die/internal/tbtd/content"
 )
 
 // clearBossProjectiles removes only this encounter's attack projectiles;
@@ -250,4 +260,367 @@ func (world *World) BossRecoveryID(ctx context.Context) string {
 		return ""
 	}
 	return fmt.Sprintf("%s-%d", world.boss.definition.Encounter, world.boss.recovery)
+}
+
+// BossPresentation is supplementary Russian-facing encounter data. Attack
+// mechanics remain owned by content.BossDefinition, not these labels. Missing
+// final media is not a claim of presentation or rights acceptance.
+type BossPresentation struct {
+	SchemaVersion int                 `json:"schema_version"`
+	Encounter     content.EncounterID `json:"encounter"`
+	Actor         string              `json:"actor"`
+	Name          string              `json:"name"`
+	Adult         bool                `json:"adult"`
+	Appearance    string              `json:"appearance"`
+	Aftermath     string              `json:"aftermath"`
+	MediaStatus   string              `json:"media_status"`
+}
+
+func validateBossPresentation(ctx context.Context, presentation BossPresentation) (err error) {
+	defer mon.Task()(&ctx)(&err)
+	if err = ctx.Err(); err != nil {
+		return err
+	}
+	definition, err := content.FindBossDefinition(ctx, presentation.Encounter)
+	if err != nil {
+		return err
+	}
+	var actor, name string
+	switch definition.Encounter {
+	case "ENC-HOS-05":
+		actor, name = "CHR-POT", "Ренат Потрошин"
+	case "ENC-CHU-05":
+		actor, name = "CHR-SAV", "Отец Савва"
+	default:
+		return fmt.Errorf("unsupported boss presentation %s", definition.Encounter)
+	}
+	if presentation.SchemaVersion != 1 || presentation.Actor != actor || presentation.Name != name || !presentation.Adult || presentation.MediaStatus != "missing" || strings.TrimSpace(presentation.Appearance) == "" || strings.TrimSpace(presentation.Aftermath) == "" || strings.ContainsRune(presentation.Appearance+presentation.Aftermath, utf8.RuneError) {
+		return fmt.Errorf("invalid presentation for %s", definition.Encounter)
+	}
+	return nil
+}
+
+// LoadBossPresentation reads strictly bounded, supplemental authored text from
+// an injected filesystem. It never treats absent art or rights as delivered.
+func LoadBossPresentation(ctx context.Context, filesystem fs.FS, name string) (_ BossPresentation, err error) {
+	defer mon.Task()(&ctx)(&err)
+	if filesystem == nil || !fs.ValidPath(name) {
+		return BossPresentation{}, fmt.Errorf("invalid presentation path")
+	}
+	if err = ctx.Err(); err != nil {
+		return BossPresentation{}, err
+	}
+	file, err := filesystem.Open(name)
+	if err != nil {
+		return BossPresentation{}, fmt.Errorf("open boss presentation: %w", err)
+	}
+	data, readErr := io.ReadAll(io.LimitReader(file, 65537))
+	closeErr := file.Close()
+	if readErr != nil || closeErr != nil {
+		return BossPresentation{}, fmt.Errorf("read boss presentation: %w", errors.Join(readErr, closeErr))
+	}
+	if len(data) > 65536 || !utf8.Valid(data) {
+		return BossPresentation{}, fmt.Errorf("invalid boss presentation encoding or size")
+	}
+	// The document is a flat object; check spelling and duplicate keys before
+	// typed decoding, since encoding/json otherwise accepts both silently.
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	token, err := decoder.Token()
+	if err != nil || token != json.Delim('{') {
+		return BossPresentation{}, fmt.Errorf("invalid boss presentation object")
+	}
+	allowed := []string{"schema_version", "encounter", "actor", "name", "adult", "appearance", "aftermath", "media_status"}
+	seen := make(map[string]bool, len(allowed))
+	for decoder.More() {
+		keyToken, keyErr := decoder.Token()
+		key, ok := keyToken.(string)
+		if keyErr != nil || !ok || !slices.Contains(allowed, key) || seen[key] {
+			return BossPresentation{}, fmt.Errorf("invalid boss presentation field")
+		}
+		seen[key] = true
+		var value json.RawMessage
+		if err = decoder.Decode(&value); err != nil || bytes.Equal(value, []byte("null")) {
+			return BossPresentation{}, fmt.Errorf("invalid boss presentation value")
+		}
+	}
+	if _, err = decoder.Token(); err != nil || len(seen) != len(allowed) {
+		return BossPresentation{}, fmt.Errorf("incomplete boss presentation")
+	}
+	if _, err = decoder.Token(); !errors.Is(err, io.EOF) {
+		return BossPresentation{}, fmt.Errorf("trailing boss presentation data")
+	}
+	var presentation BossPresentation
+	decoder = json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err = decoder.Decode(&presentation); err != nil {
+		return BossPresentation{}, fmt.Errorf("decode boss presentation: %w", err)
+	}
+	if err = validateBossPresentation(ctx, presentation); err != nil {
+		return BossPresentation{}, err
+	}
+	return presentation, nil
+}
+
+// SetPresentation binds validated labels to the matching live encounter. This
+// is optional for simulation and does not certify any missing media.
+func (arena *BossArena) SetPresentation(ctx context.Context, presentation BossPresentation) (err error) {
+	defer mon.Task()(&ctx)(&err)
+	if arena == nil || arena.world == nil || arena.world.boss.definition.Encounter != presentation.Encounter {
+		return fmt.Errorf("boss presentation encounter mismatch")
+	}
+	if err = validateBossPresentation(ctx, presentation); err != nil {
+		return err
+	}
+	arena.presentation = &presentation
+	return nil
+}
+
+// ArenaProjectile is a committed confession projectile. Coordinates and
+// velocity use the same units as the world collision solver.
+type ArenaProjectile struct {
+	ID       string
+	Position Vector
+	Velocity Vector
+}
+
+// BossArenaView exposes encounter-specific markers without making them a
+// durable campaign result. Aftermath flags require the shared save acknowledgment.
+type BossArenaView struct {
+	Boss            BossView
+	Presentation    *BossPresentation
+	Danger          []Rect
+	Projectiles     []ArenaProjectile
+	Conveyors       []Rect
+	Screen          string
+	OrganShortage   bool
+	SpecimenBurst   bool
+	Survived        bool
+	DriveStopped    bool
+	WardBypass      bool
+	ArchiveOpen     bool
+	KioskAccessible bool
+}
+
+// BossArena executes the local physical attacks around the shared boss state
+// machine. A newly restored World needs a newly constructed BossArena.
+type BossArena struct {
+	world        *World
+	projectiles  []ArenaProjectile
+	presentation *BossPresentation
+}
+
+// NewBossArena binds the hospital or church executor to a restored boss world.
+func NewBossArena(ctx context.Context, world *World) (_ *BossArena, err error) {
+	defer mon.Task()(&ctx)(&err)
+	if world == nil || world.grid == nil || (world.boss.definition.Encounter != "ENC-HOS-05" && world.boss.definition.Encounter != "ENC-CHU-05") {
+		return nil, fmt.Errorf("hospital or church boss world required")
+	}
+	if world.boss.stage != BossDormant && world.boss.stage != BossDefeated {
+		return nil, fmt.Errorf("boss arena must be bound at restoration")
+	}
+	return &BossArena{world: world}, nil
+}
+
+// View returns detached warning shapes, projectiles and acknowledged aftermath.
+func (arena *BossArena) View(ctx context.Context) BossArenaView {
+	defer mon.Task()(&ctx)(nil)
+	if arena == nil || arena.world == nil {
+		return BossArenaView{}
+	}
+	world := arena.world
+	view := BossArenaView{Boss: world.Boss(ctx), Projectiles: slices.Clone(arena.projectiles)}
+	if arena.presentation != nil {
+		presentation := *arena.presentation
+		view.Presentation = &presentation
+	}
+	if world.boss.stage == BossTelegraph {
+		view.Danger = bossWarningAreas(world.boss.attack(), world.boss.markers)
+	} else if world.boss.stage == BossActive {
+		view.Danger = bossWarningAreas(world.boss.attack(), world.boss.locked)
+		if world.boss.attack().ID == "HOS-B" && len(world.boss.locked) == 1 {
+			view.Danger = []Rect{hospitalTrolley(world.boss.locked[0], world.boss.elapsed)}
+		}
+	}
+	if world.boss.definition.Encounter == "ENC-HOS-05" && world.boss.stage != BossDefeated && world.boss.stage != BossPending {
+		view.Conveyors = hospitalConveyors(world.boss.phase)
+		view.OrganShortage = world.boss.stage == BossTransition && world.boss.phase == 2
+		view.SpecimenBurst = world.boss.stage == BossRecovery
+	}
+	if world.boss.definition.Encounter == "ENC-CHU-05" {
+		switch world.boss.phase {
+		case 1:
+			view.Screen = "private_confessions"
+		case 2:
+			view.Screen = "paid_scandal_advertisements"
+		}
+	}
+	if world.boss.stage == BossDefeated {
+		view.Survived = true
+		if world.boss.definition.Encounter == "ENC-HOS-05" {
+			view.DriveStopped, view.WardBypass = true, true
+		} else {
+			view.ArchiveOpen, view.KioskAccessible = true, true
+		}
+	}
+	return view
+}
+
+// Step runs the real shared boss tick and resolves local attacks with the
+// inherited damage and collision rules. Failure leaves the world unchanged.
+func (arena *BossArena) Step(ctx context.Context, command ObjectCommand) (err error) {
+	defer mon.Task()(&ctx)(&err)
+	if arena == nil || arena.world == nil {
+		return fmt.Errorf("missing boss arena")
+	}
+	world := arena.world
+	before := *world
+	before.state, before.previous = cloneState(world.state), cloneState(world.previous)
+	before.combat, before.limbs, before.feces = cloneCombat(world.combat), cloneLimbs(world.limbs), cloneFeces(world.feces)
+	before.objects, before.boss = cloneObjects(world.objects), cloneBoss(world.boss)
+	shots := slices.Clone(arena.projectiles)
+	defer func() {
+		if err != nil {
+			*world = before
+			arena.projectiles = shots
+		}
+	}()
+	if world.boss.stage == BossPending {
+		return fmt.Errorf("boss victory awaits acknowledgment")
+	}
+	if err = arena.carryConveyor(ctx); err != nil {
+		return err
+	}
+	arena.moveHospitalRig()
+	if world.boss.stage == BossActive {
+		switch world.boss.attack().ID {
+		case "HOS-B":
+			// 1,013 pixels of travel at three pixels per tick; neither end
+			// of the trolley enters a protected alcove.
+			err = world.extendBossActive(ctx, 338)
+		case "HOS-C", "CHU-B":
+			// The impact follows the locked warning rather than striking on
+			// the very first tick. Players can actually leave the marker.
+			err = world.extendBossActive(ctx, 48)
+		case "CHU-C":
+			err = world.extendBossActive(ctx, 436)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	// A trial on an isolated copy samples the player's post-movement location
+	// at the exact telegraph boundary and predicts local contacts for the
+	// inherited, identity-ordered damage resolver.
+	trial := world.copyEncounterWorld(ctx)
+	trial.boss = cloneBoss(world.boss)
+	if err = trial.StepBoss(ctx, command); err != nil {
+		return err
+	}
+	if world.boss.stage == BossTelegraph {
+		markers := localBossMarkers(world.boss.attack(), trial.state.Player.Bounds)
+		if err = world.prepareBossMarkers(ctx, markers); err != nil {
+			return err
+		}
+	}
+	if world.boss.stage == BossActive && trial.boss.stage != BossPending && trial.boss.stage != BossTransition {
+		var hits []DamageHit
+		hits, err = arena.localHits(ctx, before.state.Player.Bounds, trial.state.Player.Bounds)
+		if err != nil {
+			return err
+		}
+		command.Feces.Limb.Combat.Hits = append(slices.Clone(command.Feces.Limb.Combat.Hits), hits...)
+	}
+	if err = world.StepBoss(ctx, command); err != nil {
+		return err
+	}
+	// A warning must already be visible on the first telegraph frame, not
+	// only after its first timer tick. Later samples still lock at its end.
+	if world.boss.stage == BossTelegraph && world.boss.elapsed == 0 {
+		if err = world.prepareBossMarkers(ctx, localBossMarkers(world.boss.attack(), world.state.Player.Bounds)); err != nil {
+			return err
+		}
+	}
+	// Preserve the pre-conveyor state for interpolation, not a partial tick.
+	world.previous = before.state
+	if world.boss.stage == BossTransition || world.boss.stage == BossPending || world.boss.stage == BossDefeated {
+		arena.projectiles = nil
+	}
+	return nil
+}
+
+func localBossMarkers(attack content.BossAttack, player Rect) []Vector {
+	x := centerX(player)
+	switch attack.ID {
+	case "HOS-A":
+		return []Vector{{X: math.Max(232, math.Min(1048, x))}}
+	case "HOS-B":
+		return []Vector{{X: x}}
+	case "HOS-C":
+		x = math.Max(320, math.Min(960, x))
+		return []Vector{{X: x - 160}, {X: x}, {X: x + 160}}
+	case "CHU-A":
+		return []Vector{{X: math.Max(252, math.Min(1028, x))}}
+	case "CHU-B":
+		return []Vector{{X: math.Max(162, math.Min(1118, x))}}
+	case "CHU-C":
+		return []Vector{{X: x, Y: 20}, {X: x, Y: 100}, {X: x, Y: 180}}
+	}
+	return nil
+}
+
+func bossWarningAreas(attack content.BossAttack, markers []Vector) []Rect {
+	var areas []Rect
+	for _, marker := range markers {
+		switch attack.ID {
+		case "HOS-A", "CHU-A":
+			areas = append(areas, Rect{X: marker.X - float64(attack.MarkerWidth)/2, Y: 0, Width: float64(attack.MarkerWidth), Height: 48})
+		case "HOS-B":
+			areas = append(areas, Rect{X: 112, Y: 0, Width: 1056, Height: 48})
+		case "HOS-C":
+			areas = append(areas, Rect{X: marker.X - 32, Y: 0, Width: 64, Height: 72})
+		case "CHU-B":
+			areas = append(areas, Rect{X: marker.X - 50, Y: 0, Width: 100, Height: 400})
+		case "CHU-C":
+			areas = append(areas, Rect{X: 112, Y: marker.Y - 4, Width: 1056, Height: 8})
+		}
+	}
+	return areas
+}
+
+func (arena *BossArena) localHits(ctx context.Context, from, to Rect) (_ []DamageHit, err error) {
+	defer mon.Task()(&ctx)(&err)
+	world, boss := arena.world, &arena.world.boss
+	attack := boss.attack()
+	if len(boss.locked) != attack.TargetCount {
+		return nil, fmt.Errorf("missing locked boss targets")
+	}
+	if attack.ID == "CHU-C" {
+		return arena.confessionHits(ctx, from, to)
+	}
+	var areas []Rect
+	relativeTo := to
+	if attack.ID == "HOS-B" {
+		area := hospitalTrolley(boss.locked[0], boss.elapsed)
+		next := hospitalTrolley(boss.locked[0], boss.elapsed+1)
+		// Sweep in relative coordinates, not just against the trolley's
+		// position at one end of the tick.
+		relativeTo = moved(to, Vector{X: area.X - next.X})
+		areas = []Rect{area}
+	} else if ((attack.ID == "HOS-C" || attack.ID == "CHU-B") && boss.elapsed == boss.duration()-1) || (attack.ID != "HOS-C" && attack.ID != "CHU-B" && boss.elapsed == 0) {
+		areas = bossWarningAreas(attack, boss.locked)
+	}
+	if world.protected(from) || world.protected(to) {
+		return nil, nil
+	}
+	var hits []DamageHit
+	for index, area := range areas {
+		if sweptOverlap(from, relativeTo, area) {
+			direction := 1
+			if centerX(to) < centerX(area) {
+				direction = -1
+			}
+			hits = append(hits, DamageHit{Attacker: string(boss.definition.Encounter), Attack: fmt.Sprintf("%s-%d-%d", attack.ID, boss.recovery, index), Kind: OrdinaryDamage, Amount: attack.Damage, Direction: direction})
+		}
+	}
+	return hits, nil
 }
