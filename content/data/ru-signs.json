@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "entries": [
+    {"id":"TXT-SIGN-HOS","ref":"LOC-HOS","text":"Больница «Дай Бог здоровья»"},
+    {"id":"TXT-SIGN-CHU","ref":"LOC-CHU","text":"Церковь Святого Кэшбэка"},
+    {"id":"TXT-SIGN-MIN","ref":"LOC-MIN","text":"Министерство общественного благополучия"},
+    {"id":"TXT-SIGN-INS","ref":"LOC-INS","text":"Институт полезных дебилов"},
+    {"id":"TXT-SIGN-HOS-DONATION","ref":"LOC-HOS","text":"Пожертвования на лечение рака"},
+    {"id":"TXT-SIGN-HOS-LIFE","ref":"LOC-HOS","text":"Каждая жизнь бесценна"},
+    {"id":"TXT-SIGN-HOS-WING","ref":"LOC-HOS","text":"ДЕТСКОЕ ОТДЕЛЕНИЕ"},
+    {"id":"TXT-SIGN-HOS-DISPATCH","ref":"LOC-HOS","text":"Отгрузка органов"},
+    {"id":"TXT-SIGN-HOS-VOLUNTEER","ref":"LOC-HOS","text":"Вход добровольцев"},
+    {"id":"TXT-SIGN-CHU-CONFESSION","ref":"LOC-CHU","text":"Исповедь при поддержке спонсоров"},
+    {"id":"TXT-SIGN-CHU-ARCHIVE","ref":"LOC-CHU","text":"Заверение благотворительных документов"},
+    {"id":"TXT-SIGN-MIN-CONTROL","ref":"LOC-MIN","text":"Контроль без унижения"},
+    {"id":"TXT-SIGN-MIN-PERMIT","ref":"LOC-MIN","text":"Разрешительный стол"},
+    {"id":"TXT-SIGN-INS-SOURCE","ref":"LOC-INS","text":"Источник набора последователей"},
+    {"id":"TXT-SIGN-INS-EXIT","ref":"LOC-INS","text":"Выход для отказавшихся от подписки"},
+    {"id":"TXT-SIGN-APPOINTMENT","ref":"END-HELL","text":"Министр здравоохранения"},
+    {"id":"TXT-SIGN-CASINO","ref":"END-CEREMONY","text":"Казино: будущие средства для здравоохранения"}
+  ]
+}
