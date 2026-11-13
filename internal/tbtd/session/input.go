@@ -19,6 +19,8 @@ type inputQueue struct {
 	values map[settings.Action]ActionValue
 
 	edges []simulation.PlayerEdge
+
+	resumeBlocked bool
 }
 
 func (input *inputQueue) sample(ctx context.Context, frame FrameInput, disconnected bool) []ActionEdge {
@@ -29,6 +31,7 @@ func (input *inputQueue) sample(ctx context.Context, frame FrameInput, disconnec
 	if disconnected {
 		clear(input.held)
 	}
+	input.resumeBlocked = frame.ResumeBlocked
 	var accepted []ActionEdge
 	for _, edge := range frame.Edges {
 		if disconnected && edge.Kind == Pressed {
@@ -84,6 +87,9 @@ func (input *inputQueue) clearGameplay() {
 }
 
 func (input *inputQueue) canResume() bool {
+	if input.resumeBlocked {
+		return false
+	}
 	for _, action := range []settings.Action{settings.Melee, settings.Throw, settings.RemoveLimb, settings.MenuConfirm} {
 		if input.held[action] {
 			return false
