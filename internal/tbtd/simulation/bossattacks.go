@@ -382,7 +382,9 @@ func (arena *BossArena) SetPresentation(ctx context.Context, presentation BossPr
 // ArenaProjectile is a committed confession projectile. Coordinates and
 // velocity use the same units as the world collision solver.
 type ArenaProjectile struct {
-	ID       string
+	ID string
+	// Attack remains the release identity even if the boss changes phase.
+	Attack   string
 	Position Vector
 	Velocity Vector
 	// Remaining bounds a committed projectile's flight, including a missed target.
@@ -453,17 +455,12 @@ func (arena *BossArena) View(ctx context.Context) BossArenaView {
 	}
 	world := arena.world
 	view := BossArenaView{Boss: world.Boss(ctx), Projectiles: slices.Clone(arena.projectiles)}
+	// Both public views describe the same tick. Keep their detached slices
+	// independent without maintaining a second warning-geometry calculation.
+	view.Danger = slices.Clone(view.Boss.Danger)
 	if arena.presentation != nil {
 		presentation := *arena.presentation
 		view.Presentation = &presentation
-	}
-	if world.boss.stage == BossTelegraph {
-		view.Danger = bossWarningAreas(world.boss.attack(), world.boss.markers)
-	} else if world.boss.stage == BossActive {
-		view.Danger = bossWarningAreas(world.boss.attack(), world.boss.locked)
-		if world.boss.attack().ID == "HOS-B" && len(world.boss.locked) == 1 {
-			view.Danger = []Rect{hospitalTrolley(world.boss.locked[0], world.boss.elapsed)}
-		}
 	}
 	if world.boss.definition.Encounter == "ENC-HOS-05" && world.boss.stage != BossDefeated && world.boss.stage != BossPending {
 		view.Conveyors = hospitalConveyors(world.boss.phase)

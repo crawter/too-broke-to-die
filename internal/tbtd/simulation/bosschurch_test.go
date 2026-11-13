@@ -151,7 +151,7 @@ func TestConfessionReleaseOrderAndInterrupt(t *testing.T) {
 	}
 	shots := arena.View(ctx).Projectiles
 	for i, height := range []float64{20, 100, 180} {
-		if shots[i].Position.Y != height || shots[i].Velocity.X != -360 {
+		if shots[i].Position.Y != height || shots[i].Velocity.X != -360 || shots[i].Attack != "CHU-C" {
 			t.Fatalf("projectile %d: %+v", i, shots[i])
 		}
 	}

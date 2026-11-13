@@ -73,8 +73,8 @@ func TestInstituteBinderPathsAndBeamLevels(t *testing.T) {
 		t.Fatal("two binder trajectories did not release")
 	}
 	for _, shot := range arena.View(ctx).Projectiles {
-		if shot.Velocity.Y >= 0 {
-			t.Fatalf("wrong trajectory: %+v", shot)
+		if shot.Velocity.Y >= 0 || shot.Attack != "INS-C" {
+			t.Fatalf("wrong trajectory or release identity: %+v", shot)
 		}
 	}
 	floor := instituteMarkers(world.boss.definition.Attacks[0], Rect{X: 500, Y: 0, Width: 28, Height: 58})

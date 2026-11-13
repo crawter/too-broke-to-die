@@ -76,6 +76,14 @@ type MenuSelection struct {
 	Target string
 }
 
+// ReticleInput carries the mouse position on the unscaled logical canvas.
+// A controller supplies aim direction instead; no pointer is invented for it.
+type ReticleInput struct {
+	Pointer bool
+	Visible bool
+	X, Y    float64
+}
+
 // FrameInput is the construction data for one frame. Elapsed is an interval
 // from a monotonic clock, not an absolute timestamp. Edges remain ordered.
 // Values update the named controls; omitted values retain their last sample.
@@ -93,6 +101,8 @@ type FrameInput struct {
 	// ResumeBlocked reports a held quarantined control that cannot trigger
 	// until release. It must not participate in action-edge deduplication.
 	ResumeBlocked bool
+
+	Reticle ReticleInput
 
 	Focus FocusChange
 
@@ -112,6 +122,9 @@ func NewFrameCommand(ctx context.Context, input FrameInput) (_ FrameCommand, err
 	defer mon.Task()(&ctx)(&err)
 	if input.Elapsed < 0 || (input.Focus != FocusUnchanged && input.Focus != FocusGained && input.Focus != FocusLost) {
 		return FrameCommand{}, fmt.Errorf("%w: frame timing or focus", InvalidAction)
+	}
+	if input.Reticle.Visible && (!input.Reticle.Pointer || math.IsNaN(input.Reticle.X) || math.IsNaN(input.Reticle.Y) || math.IsInf(input.Reticle.X, 0) || math.IsInf(input.Reticle.Y, 0) || input.Reticle.X < 0 || input.Reticle.X >= 1280 || input.Reticle.Y < 0 || input.Reticle.Y >= 720) {
+		return FrameCommand{}, fmt.Errorf("%w: reticle position", InvalidAction)
 	}
 	seen := make(map[settings.Action]bool, len(input.Values))
 	for _, value := range input.Values {

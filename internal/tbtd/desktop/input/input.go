@@ -207,6 +207,17 @@ func (sampler *Sampler) SampleSnapshot(ctx context.Context, frame Frame, snapsho
 		aim = Point{}
 	}
 	input.Values = append(input.Values, session.ActionValue{Action: settings.Aim, X: aim.X, Y: aim.Y})
+	if snapshot.Focused && !interrupted && sampler.active != settings.Controller && sampler.pointerUsed {
+		for _, binding := range sampler.bindings {
+			if binding.Action == settings.Aim && binding.Device == settings.Mouse && binding.Control == "Motion" {
+				input.Reticle.Pointer = true
+				if point, ok := frame.View.LogicalPoint(ctx, snapshot.Pointer); ok {
+					input.Reticle = session.ReticleInput{Pointer: true, Visible: true, X: point.X, Y: point.Y}
+				}
+				break
+			}
+		}
+	}
 	command, err := session.NewFrameCommand(ctx, input)
 	if err != nil {
 		return session.FrameCommand{}, err

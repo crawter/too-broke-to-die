@@ -76,12 +76,12 @@ func (arena *BossArena) trajectoryHits(ctx context.Context, from, to Rect) (_ []
 			if length < 1 {
 				dx, dy, length = -1, 0, 1
 			}
-			arena.projectiles = append(arena.projectiles, ArenaProjectile{ID: fmt.Sprintf("MIN-A-%d-%d", boss.recovery, index), Position: origin, Velocity: Vector{X: 720 * dx / length, Y: 720 * dy / length}, Remaining: 240})
+			arena.projectiles = append(arena.projectiles, ArenaProjectile{ID: fmt.Sprintf("MIN-A-%d-%d", boss.recovery, index), Attack: attack.ID, Position: origin, Velocity: Vector{X: 720 * dx / length, Y: 720 * dy / length}, Remaining: 240})
 		}
 	}
 	if attack.ID == "INS-C" && boss.elapsed == 0 {
 		for index, marker := range boss.locked {
-			arena.projectiles = append(arena.projectiles, ArenaProjectile{ID: fmt.Sprintf("INS-C-%d-%d", boss.recovery, index), Position: Vector{X: marker.X, Y: 320}, Velocity: Vector{Y: -360}, Remaining: 120})
+			arena.projectiles = append(arena.projectiles, ArenaProjectile{ID: fmt.Sprintf("INS-C-%d-%d", boss.recovery, index), Attack: attack.ID, Position: Vector{X: marker.X, Y: 320}, Velocity: Vector{Y: -360}, Remaining: 120})
 		}
 	}
 	var hits []DamageHit

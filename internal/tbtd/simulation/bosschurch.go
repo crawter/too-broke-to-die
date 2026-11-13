@@ -24,6 +24,7 @@ func (arena *BossArena) confessionHits(ctx context.Context, from, to Rect) (_ []
 			}
 			arena.projectiles = append(arena.projectiles, ArenaProjectile{
 				ID:       fmt.Sprintf("CHU-C-%d-%d", boss.recovery, index),
+				Attack:   attack.ID,
 				Position: Vector{X: x, Y: float64(attack.ProjectileHeights[index])},
 				Velocity: Vector{X: speed},
 			})

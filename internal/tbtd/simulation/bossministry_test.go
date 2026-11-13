@@ -180,8 +180,14 @@ func TestMinistryGlobsAndWaste(t *testing.T) {
 	for n := 0; n <= 90; n++ {
 		arenaTick(t, arena, PlayerCommand{})
 		if n == 30 || n == 60 || n == 90 {
-			if got := len(arena.View(ctx).Projectiles); got != n/30 {
-				t.Fatalf("release %d: %d", n, got)
+			shots := arena.View(ctx).Projectiles
+			if len(shots) != n/30 {
+				t.Fatalf("release %d: %d", n, len(shots))
+			}
+			for _, shot := range shots {
+				if shot.Attack != "MIN-A" {
+					t.Fatalf("lost release identity: %+v", shot)
+				}
 			}
 		}
 		if world.boss.locked[0] != locked {

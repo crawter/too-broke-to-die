@@ -32,6 +32,12 @@ type Service struct {
 
 	world *simulation.World
 
+	bossWorld *simulation.World
+
+	bossArena *simulation.BossArena
+
+	worldGeneration uint64
+
 	committed campaign.Snapshot
 
 	id CampaignID
@@ -71,6 +77,8 @@ type Service struct {
 	failureHandled bool
 
 	events []SemanticEvent
+
+	effects []EffectEvent
 }
 
 type pendingProgress struct {
@@ -127,6 +135,7 @@ func (service *Service) HandleFrame(ctx context.Context, command FrameCommand) (
 	}
 	service.notice = ""
 	service.events = nil
+	service.effects = nil
 	if service.pending != nil && service.pending.inFlight {
 		elapsed := command.Data(ctx).Elapsed
 		if elapsed > 0 && service.pending.elapsed < 5*time.Second {
@@ -237,10 +246,36 @@ func (service *Service) HandleFrame(ctx context.Context, command FrameCommand) (
 	return view, stepErr
 }
 
+// bindBossArena reconstructs the encounter executor once per restored world.
+// The arena owns its transient projectiles and warning locks, not save state.
+func (service *Service) bindBossArena(ctx context.Context) (err error) {
+	defer mon.Task()(&ctx)(&err)
+	if service.world == service.bossWorld {
+		return nil
+	}
+	var arena *simulation.BossArena
+	if service.world != nil && service.world.Boss(ctx).Encounter != "" {
+		arena, err = simulation.NewBossArena(ctx, service.world)
+		if err != nil {
+			return fmt.Errorf("boss arena: %w", err)
+		}
+	}
+	if service.worldGeneration == math.MaxUint64 {
+		return fmt.Errorf("%w: world generation exhausted", Internal)
+	}
+	service.bossWorld, service.bossArena = service.world, arena
+	service.worldGeneration++
+	service.effects = nil
+	return nil
+}
+
 func (service *Service) step(ctx context.Context, input simulation.PlayerCommand) (err error) {
 	defer mon.Task()(&ctx)(&err)
 	if service.world == nil {
 		return fmt.Errorf("%w: no restored world", Internal)
+	}
+	if err = service.bindBossArena(ctx); err != nil {
+		return err
 	}
 	_, state := service.world.Snapshot(ctx).Data(ctx)
 	body := state.Player.Bounds
@@ -256,7 +291,7 @@ func (service *Service) step(ctx context.Context, input simulation.PlayerCommand
 	}
 	switch {
 	case boss.Encounter != "":
-		err = service.world.StepBoss(ctx, objects)
+		err = service.bossArena.Step(ctx, objects)
 	case isBay:
 		err = service.world.StepEncounter(ctx, simulation.ServiceCommand{Objects: objects})
 	default:
@@ -265,6 +300,7 @@ func (service *Service) step(ctx context.Context, input simulation.PlayerCommand
 	if err != nil {
 		return err
 	}
+	service.captureEffects(ctx)
 	return service.collect(ctx, isBay)
 }
 
@@ -326,17 +362,9 @@ func (service *Service) view(ctx context.Context) (_ FrameView, err error) {
 		data.Texts = append(data.Texts, TextView{ID: unit.TextID, Speaker: unit.Speaker, Text: unit.Text, Direction: unit.Direction})
 	}
 	if service.world != nil {
-		previous, current := service.world.Snapshot(ctx).Data(ctx)
-		status := service.world.PlayerStatus()
-		data.Player = PlayerView{Health: current.Health, Feces: current.Feces, Immune: status.OrdinaryImmune, Limbs: [4]bool{status.Limbs&simulation.LeftArm != 0, status.Limbs&simulation.RightArm != 0, status.Limbs&simulation.LeftLeg != 0, status.Limbs&simulation.RightLeg != 0}}
-		if current.HasPlayer {
-			data.Entities = append(data.Entities, EntityView{ID: "player", PreviousX: previous.Player.Bounds.X, PreviousY: previous.Player.Bounds.Y, X: current.Player.Bounds.X, Y: current.Player.Bounds.Y})
+		if err = service.worldView(ctx, &data); err != nil {
+			return FrameView{}, err
 		}
-		for _, entity := range current.Entities {
-			data.Entities = append(data.Entities, EntityView{ID: string(entity.ID), X: entity.Position.X, Y: entity.Position.Y, PreviousX: entity.Position.X, PreviousY: entity.Position.Y})
-		}
-		boss := service.world.Boss(ctx)
-		data.Boss = BossView{ID: boss.Encounter, Health: boss.Health, Phase: boss.Phase, Protected: boss.Protected}
 	}
 	return NewFrameView(ctx, data, service.committed, service.id, service.revision)
 }
