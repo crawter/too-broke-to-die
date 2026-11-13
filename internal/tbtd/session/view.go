@@ -299,6 +299,21 @@ type FrameViewData struct {
 
 	Pending PendingEvent
 
+	// Confirmation names the destructive or rollback action awaiting explicit consent.
+	Confirmation string
+
+	// Warning explains the confirmation's rollback scope and saved total.
+	Warning string
+
+	// Slow reports that an accepted storage operation has taken at least five seconds.
+	Slow bool
+
+	// Notice describes a resolved recovery or rollback without claiming unsaved success.
+	Notice string
+
+	// ExitRequested becomes true only after a confirmed safe exit.
+	ExitRequested bool
+
 	Error ErrorCode
 
 	Choices []RecoveryChoice

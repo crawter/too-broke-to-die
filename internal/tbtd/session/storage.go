@@ -346,6 +346,12 @@ type ProgressStore interface {
 	Poll(ctx context.Context, id RequestID) (ProgressResult, error)
 }
 
+// ProgressDiscarder is the external store's explicit, revalidated discard boundary.
+// It accepts the original resolved request and reports its result through Poll.
+type ProgressDiscarder interface {
+	DiscardProgress(ctx context.Context, request ProgressRequest) error
+}
+
 // SettingsStore is a separate typed view of the same owned writer; a settings
 // failure must never roll back campaign progress. Implementations may expose
 // separate facades because Go methods cannot overload Submit or Poll.
