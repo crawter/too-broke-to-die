@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "institutions": [
+    {"code":"HOS","palette":["#DDD6BE","#77A59A","#A68A52","#293D40"],"direction":"Tile columns, dispatch windows, patched curtains and specimen rails; clean displays beside dirty service routes."},
+    {"code":"CHU","palette":["#D8BD7F","#654358","#30292D","#B99A54"],"direction":"Receipt banners, camera confession booths and donation conveyors under ceremonial arches."},
+    {"code":"MIN","palette":["#D1C19B","#34495B","#7F8278","#69543C"],"direction":"Counters, queues, ducts and statistics boards; leaking infrastructure and expressive workers."},
+    {"code":"INS","palette":["#705783","#A7C3AF","#25262C","#C67B8E"],"direction":"Temporary studio walls, exposed supports, camera rings and plain municipal city-node equipment."}
+  ],
+  "families": [
+    {"id":"SUP","direction":"Continuous floor arrows and seal symbols.","roles":["TROLLEY","PAD","TERMINAL","CRUSHER"],"states":["INTACT","BROKEN"]},
+    {"id":"RES","direction":"Plate, latch, waiting-point and refuge symbols.","roles":["ACTOR","PLATE","CRATE","GATE","LATCH","REFUGE","TERMINAL"],"states":["CLOSED","WEIGHTEDOPEN","LATCHEDOPEN"]},
+    {"id":"UTL","direction":"Circuit numbers and impact-paddle diagrams.","roles":["PADDLE","SWITCH","FUSE","TERMINAL"],"states":["UNLATCHED","LATCHED"]},
+    {"id":"PRV","direction":"Recorder, lens and interruption symbols.","roles":["RECORDER","CAMERA","TERMINAL"],"states":["CLEAR","FOULED","RECORDEDINTERRUPTION"]}
+  ],
+  "emergency_states": ["WARN","ACTIVE","AFTER"],
+  "prologue": ["Charity annex and donation box","Pursuit corridor and heart attack","Funeral, courtyard and Vera's counter"],
+  "endings": ["DEATH","HELL","CEREMONY","TABLEAU"],
+  "tableau": "Uncropped 16:9: ribbon and minister Grisha lower center, four surviving antagonists flanking him; children's wing at least upper-right quarter, flames across windows, sign unobscured; Nina leads evacuation opposite; closing text in clear upper band."
+}

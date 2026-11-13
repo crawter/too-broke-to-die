@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "principals": [
+    {"code":"GRI","direction":"Forward neck, narrow shoulders, protruding abdomen, uneven shoes; rust jacket and volunteer badge."},
+    {"code":"VER","direction":"Upright rectangular silhouette, document tray, slate coat and stamp case."},
+    {"code":"POT","direction":"Rounded torso in extraction frame; cream coat, green apron and specimen clips."},
+    {"code":"SAV","direction":"Tapered plum robe, expensive shoes, brass receipt tabs and sponsor brooch."},
+    {"code":"BLA","direction":"Broad shoulders, compressed neck, ink-blue suit, sash and statistics pin."},
+    {"code":"LEV","direction":"Long elbows, pointed shoes, camera harness, violet tracksuit and short jacket."},
+    {"code":"NIN","direction":"Low stable stance, trolley-shaped bag, faded teal uniform and repaired sleeves."},
+    {"code":"SAT","direction":"Heavy triangular silhouette, formal waistcoat, asymmetric horns and reading lens."}
+  ],
+  "enemy_sets": [
+    {"institution":"HOS","melee":"Billing orderly with surgical tray","ranged":"Organ courier with specimen jars"},
+    {"institution":"CHU","melee":"Donation collector with collection pole","ranged":"Sponsored penitent with incense pots"},
+    {"institution":"MIN","melee":"Tax inspector with stamp club","ranged":"Statistics officer with bundled forms"},
+    {"institution":"INS","melee":"Recruitment follower with selfie stick and feed badge","ranged":"Coach with course binders"}
+  ],
+  "expressions": ["NEUTRAL","ANGER","PAIN","FEAR","DISGUST","RELIEF"],
+  "crowd_heads": 6,
+  "crowd_torsos": 4,
+  "crowd_activities": 3
+}
