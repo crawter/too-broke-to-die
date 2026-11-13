@@ -1,0 +1,303 @@
+// Copyright (C) 2026 crawter
+// All rights reserved.
+
+package session
+
+import (
+	"context"
+	"slices"
+	"testing"
+	"time"
+
+	"too-broke-to-die/internal/tbtd/campaign"
+	"too-broke-to-die/internal/tbtd/content"
+	"too-broke-to-die/internal/tbtd/settings"
+	"too-broke-to-die/internal/tbtd/simulation"
+)
+
+func TestWorldViewPublishesAuthoritativePreviewAndCopies(t *testing.T) {
+	ctx := context.Background()
+	service, store := sessionFixture(t)
+	loadFixture(t, service, store, campaign.Snapshot{})
+	frame(t, service, FrameInput{Elapsed: 25 * time.Millisecond, Values: []ActionValue{{Action: settings.MoveRight, X: 1}, {Action: settings.Aim, X: 1}}})
+	view, err := service.view(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := view.Data(ctx)
+	previous, current := service.world.Snapshot(ctx).Data(ctx)
+	if len(data.Entities) == 0 || data.Entities[0].Kind != "player" || data.Entities[0].X != current.Player.Bounds.X+current.Player.Bounds.Width/2 || data.Entities[0].PreviousX != previous.Player.Bounds.X+previous.Player.Bounds.Width/2 {
+		t.Fatalf("player position: %+v", data.Entities)
+	}
+	if data.World.Background != "ART-PRO-01" || data.World.Tick != current.Tick || len(data.World.Terrain) == 0 {
+		t.Fatalf("world view: %+v", data.World)
+	}
+	preview, err := service.world.PreviewThrow(ctx, simulation.Vector{}, nil)
+	if err != nil || len(preview.Points) != len(data.Aim.Trajectory) || !data.Aim.Visible {
+		t.Fatalf("preview: %+v %v", data.Aim, err)
+	}
+	for i, point := range preview.Points {
+		if data.Aim.Trajectory[i] != (Point{X: point.X, Y: point.Y}) {
+			t.Fatalf("preview point %d changed", i)
+		}
+	}
+	data.World.Terrain[0].X = -999
+	data.Aim.Trajectory[0].X = -999
+	again := view.Data(ctx)
+	if again.World.Terrain[0].X == -999 || again.Aim.Trajectory[0].X == -999 {
+		t.Fatal("view exposes mutable world data")
+	}
+}
+
+func TestNearbyLandingsUseValidatedLandingArea(t *testing.T) {
+	platforms := []content.Rect{{X: 0, Y: 152, Width: 1280, Height: 8}}
+	jumps := []content.BossJump{
+		{Target: 0, Jump: content.BayJump{TakeoffX: -80}},
+		{Target: 0, Jump: content.BayJump{TakeoffX: 1360, Direction: -1}},
+	}
+	left := nearbyLandings(-80, platforms, jumps)
+	right := nearbyLandings(1360, platforms, jumps)
+	if len(left) != 1 || left[0] != (WorldRect{X: 0, Y: 160, Width: 160, Height: 8}) || len(right) != 1 || right[0] != (WorldRect{X: 1120, Y: 160, Width: 160, Height: 8}) {
+		t.Fatalf("landing extents: %+v %+v", left, right)
+	}
+	if got := nearbyLandings(600, platforms, jumps); len(got) != 0 {
+		t.Fatalf("distant takeoff selected: %+v", got)
+	}
+}
+
+func TestWorldViewPublishesPuzzleObjectBinding(t *testing.T) {
+	ctx := context.Background()
+	service, store := sessionFixture(t)
+	committed, _ := preparedCertification(t)
+	loadFixture(t, service, store, committed)
+	data := frame(t, service, FrameInput{Elapsed: 25 * time.Millisecond, Values: []ActionValue{{Action: settings.MoveRight, X: 1}}})
+	objects := service.world.Objects(ctx)
+	found := false
+	for _, object := range objects {
+		if object.Kind != simulation.ObjectTrolley {
+			continue
+		}
+		for _, entity := range data.Entities {
+			if entity.ID == object.ID {
+				found = true
+				if entity.Kind != "object" || entity.Asset != "ART-OBJ-HOS-SUP-TROLLEY" || entity.X != object.Bounds.X+object.Bounds.Width/2 || entity.Y != object.Bounds.Y {
+					t.Fatalf("trolley view: %+v versus %+v", entity, object)
+				}
+			}
+		}
+	}
+	if !found {
+		t.Fatal("active trolley missing from presentation")
+	}
+}
+
+func TestLiveRescueActorHasAuthoredStateBinding(t *testing.T) {
+	ctx := context.Background()
+	service, store := sessionFixture(t)
+	progress, err := service.campaign.Start(ctx, campaign.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range service.manifest.Batches(ctx)[0].Deeds {
+		progress = certifyAuthored(t, service, progress, id)
+	}
+	progress, err = service.campaign.Accept(ctx, progress, "D-HOS-RES-01")
+	if err != nil {
+		t.Fatal(err)
+	}
+	progress, err = service.campaign.Checkpoint(ctx, progress, "ANC-HOS-02")
+	if err != nil {
+		t.Fatal(err)
+	}
+	loadFixture(t, service, store, progress)
+	view := frame(t, service, FrameInput{})
+	for _, entity := range view.Entities {
+		if entity.Kind == "rescue" && entity.Asset == "AN-RES-HOS-01-WAIT" && entity.State == "WAIT" {
+			return
+		}
+	}
+	t.Fatalf("missing live rescue actor: %+v", view.Entities)
+}
+
+func TestEnemyWarningFollowsAuthoritativePhase(t *testing.T) {
+	enemy := simulation.Enemy{ID: "orderly", Kind: simulation.MeleeEnemy, Health: 60, Facing: -1, Phase: simulation.EnemyTelegraph, Body: simulation.Body{Bounds: simulation.Rect{X: 100, Width: 28, Height: 58}}}
+	marker, ok := enemyWarning(enemy, 5)
+	if !ok || marker.State != "warning" || marker.Bounds.X != 52 || marker.Bounds.Width != 48 {
+		t.Fatalf("windup marker: %+v %v", marker, ok)
+	}
+	enemy.Phase, enemy.AttackID, enemy.StrikeTick = simulation.EnemyRecovery, 1, 6
+	if enemyVisualState(enemy, 6) != "active" || enemyVisualState(enemy, 7) != "recovery" {
+		t.Fatal("enemy release pose did not follow the strike tick")
+	}
+	marker, ok = enemyWarning(enemy, 6)
+	if !ok || marker.State != "active" {
+		t.Fatalf("active marker: %+v %v", marker, ok)
+	}
+	if _, ok = enemyWarning(enemy, 7); ok {
+		t.Fatal("recovery retained attack warning")
+	}
+	enemy.Health, enemy.Phase = 0, simulation.EnemyDefeated
+	if _, ok = enemyWarning(enemy, 6); ok {
+		t.Fatal("defeated actor retained attack warning")
+	}
+	if enemyVisualState(enemy, 6) != "defeated" {
+		t.Fatal("defeat was replaced by a stale strike pose")
+	}
+}
+
+func TestWorldViewThrowReleaseFollowsSimulation(t *testing.T) {
+	service, store := sessionFixture(t)
+	loadFixture(t, service, store, campaign.Snapshot{})
+	view := frame(t, service, FrameInput{Elapsed: 9 * time.Millisecond, Edges: []ActionEdge{{Action: settings.Throw, Kind: Pressed}}})
+	if view.Player.Action != "throw" || view.Player.AttackReleased || view.Player.Feces != 5 {
+		t.Fatalf("windup: %+v", view.Player)
+	}
+	for i := 0; i < 20 && !view.Player.AttackReleased; i++ {
+		view = frame(t, service, FrameInput{Elapsed: 9 * time.Millisecond})
+	}
+	if !view.Player.AttackReleased || view.Player.Feces != 4 || view.Player.AttackPhase == "windup" {
+		t.Fatalf("release: %+v", view.Player)
+	}
+}
+
+func TestWorldViewCarriesReticleInput(t *testing.T) {
+	ctx := context.Background()
+	service, store := sessionFixture(t)
+	loadFixture(t, service, store, campaign.Snapshot{})
+	reticle := ReticleInput{Pointer: true, Visible: true, X: 300, Y: 250}
+	view := frame(t, service, FrameInput{Reticle: reticle})
+	if view.Aim.Reticle != reticle {
+		t.Fatalf("reticle lost: %+v", view.Aim.Reticle)
+	}
+	if _, err := NewFrameCommand(ctx, FrameInput{Reticle: ReticleInput{Pointer: true, Visible: true, X: 1280}}); err == nil {
+		t.Fatal("out-of-canvas reticle accepted")
+	}
+	view = frame(t, service, FrameInput{Focus: FocusLost, Reticle: reticle})
+	if view.Aim.Reticle.Visible {
+		t.Fatal("focus loss retained active reticle")
+	}
+}
+
+func TestLiveBossArenaPublishesWarningBoundaries(t *testing.T) {
+	ctx := context.Background()
+	service, store := sessionFixture(t)
+	progress := authoredProgress(t, service, 1, false)
+	progress, err := service.campaign.Checkpoint(ctx, progress, "ANC-HOS-05")
+	if err != nil {
+		t.Fatal(err)
+	}
+	loadFixture(t, service, store, progress)
+	var view FrameViewData
+	for i := 0; i < 300 && service.world.Boss(ctx).Stage == simulation.BossDormant; i++ {
+		view = frame(t, service, FrameInput{Elapsed: 8333334 * time.Nanosecond, Values: []ActionValue{{Action: settings.MoveRight, X: 1}}})
+	}
+	assertDanger := func(expected simulation.BossStage, markerState string) {
+		t.Helper()
+		boss := service.world.Boss(ctx)
+		if boss.Stage != expected || len(boss.Danger) == 0 {
+			t.Fatalf("%s without authoritative danger: %+v", expected, boss)
+		}
+		arena := service.bossArena.View(ctx)
+		if !slices.Equal(arena.Danger, boss.Danger) || !slices.Equal(arena.Boss.Danger, boss.Danger) {
+			t.Fatalf("%s arena warning disagrees with boss: %+v %+v", expected, arena, boss)
+		}
+		arena.Danger[0].X += 1
+		if arena.Danger[0] == arena.Boss.Danger[0] || !slices.Equal(service.world.Boss(ctx).Danger, boss.Danger) {
+			t.Fatal("arena warning slices share state")
+		}
+		found := false
+		for _, marker := range view.World.Markers {
+			if marker.ID == "ENC-HOS-05:danger:0" && marker.State == markerState && marker.Bounds == worldRect(boss.Danger[0]) {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("%s warning not published: %+v", expected, view.World.Markers)
+		}
+		found = false
+		for _, entity := range view.Entities {
+			if entity.ID == "ENC-HOS-05" && entity.Kind == "boss" && entity.Asset == bossAsset(boss, "HOS") && entity.State == string(expected) {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("%s boss artwork not published: %+v", expected, view.Entities)
+		}
+	}
+	assertDanger(simulation.BossTelegraph, "warning")
+	for i := 0; i < 250 && service.world.Boss(ctx).Stage == simulation.BossTelegraph; i++ {
+		view = frame(t, service, FrameInput{Elapsed: 8333334 * time.Nanosecond, Values: []ActionValue{{Action: settings.MoveRight}}})
+	}
+	assertDanger(simulation.BossActive, "active")
+	for i := 0; i < 250 && service.world.Boss(ctx).Stage == simulation.BossActive; i++ {
+		view = frame(t, service, FrameInput{Elapsed: 8333334 * time.Nanosecond})
+	}
+	if boss := service.world.Boss(ctx); boss.Stage != simulation.BossRecovery || len(boss.Danger) != 0 {
+		t.Fatalf("recovery retained danger: %+v", boss)
+	}
+	for _, marker := range view.World.Markers {
+		if marker.ID == "ENC-HOS-05:danger:0" {
+			t.Fatal("recovery retained danger marker")
+		}
+	}
+	defeatedService, defeatedStore := sessionFixture(t)
+	defeated, err := defeatedService.campaign.DefeatBoss(ctx, progress, "ENC-HOS-05")
+	if err != nil {
+		t.Fatal(err)
+	}
+	loadFixture(t, defeatedService, defeatedStore, defeated)
+	view = frame(t, defeatedService, FrameInput{})
+	if boss := defeatedService.world.Boss(ctx); boss.Stage != simulation.BossDefeated || len(boss.Danger) != 0 {
+		t.Fatalf("defeat retained danger: %+v", boss)
+	}
+	for _, marker := range view.World.Markers {
+		if marker.ID == "ENC-HOS-05:danger:0" {
+			t.Fatal("defeated boss retained danger marker")
+		}
+	}
+}
+
+func TestAcceptedDamageProducesIsolatedEffectEvent(t *testing.T) {
+	ctx := context.Background()
+	service, store := sessionFixture(t)
+	committed, _ := preparedCertification(t)
+	loadFixture(t, service, store, committed)
+	hit := simulation.DamageHit{Attacker: "hazard", Attack: "first", Kind: simulation.OrdinaryDamage, Amount: 18, Direction: 1}
+	simulationServiceTick(t, service, simulation.PlayerCommand{}, []simulation.DamageHit{hit})
+	service.captureEffects(ctx)
+	view, err := service.view(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := view.Data(ctx)
+	if len(data.World.Effects) != 1 || data.World.Effects[0].Kind != "hit" || data.World.Effects[0].Asset != "FX-BODY" || data.World.Effects[0].Entity != "player" || data.World.Effects[0].Direction != 1 {
+		t.Fatalf("accepted damage event: %+v", data.World.Effects)
+	}
+	data.World.Effects[0].Entity = "mutated"
+	if view.Data(ctx).World.Effects[0].Entity != "player" {
+		t.Fatal("view exposes mutable effects")
+	}
+	hit.Attack = "second"
+	simulationServiceTick(t, service, simulation.PlayerCommand{}, []simulation.DamageHit{hit})
+	service.captureEffects(ctx)
+	if len(service.effects) != 1 {
+		t.Fatalf("immune hit produced another effect: %+v", service.effects)
+	}
+}
+
+func TestWorldViewReportsInterruptionImmediately(t *testing.T) {
+	ctx := context.Background()
+	service, store := sessionFixture(t)
+	loadFixture(t, service, store, campaign.Snapshot{})
+	if err := service.world.StartPlayerAction(ctx, simulation.HurtAction, 180*time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	view, err := service.view(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := view.Data(ctx)
+	if data.Player.Action != "hurt" || data.Player.AttackReleased || data.Player.Health != 100 {
+		t.Fatalf("interruption not authoritative: %+v", data.Player)
+	}
+}

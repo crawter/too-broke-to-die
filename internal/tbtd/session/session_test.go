@@ -377,15 +377,34 @@ func TestSimulatedBossVictoryWaitsForAcknowledgment(t *testing.T) {
 		t.Fatal(err)
 	}
 	loadFixture(t, service, store, progress)
-	for tick := 0; tick < 10000 && service.policy.State() == StateActive; tick++ {
+	// The live arena resolves attacks as well as boss health. Follow its
+	// warnings instead of standing in every hazard while testing save gating.
+	var jumpedFor string
+	for tick := 0; tick < 16000 && service.policy.State() == StateActive; tick++ {
 		_, world := service.world.Snapshot(ctx).Data(ctx)
 		boss := service.world.Boss(ctx)
+		body := world.Player.Bounds
 		input := FrameInput{Elapsed: 8333334 * time.Nanosecond, Values: []ActionValue{{Action: settings.MoveLeft}, {Action: settings.MoveRight}, {Action: settings.Aim, X: 1}}}
+		key := boss.Attack.ID + ":" + string(boss.Stage)
+		if boss.Stage == simulation.BossTelegraph && boss.Elapsed == 0 {
+			jumpedFor = ""
+		}
 		switch {
-		case world.Player.Bounds.X < boss.Bounds.X-80:
+		case boss.Stage == simulation.BossActive && boss.Attack.ID == "HOS-C":
 			input.Values[1].X = 1
-		case world.Player.Bounds.X > boss.Bounds.X-45:
+		case boss.Stage == simulation.BossTelegraph && boss.Attack.ID == "HOS-A" && boss.Remaining <= 20 && jumpedFor != key && body.Y < 1:
+			input.Edges = []ActionEdge{{Action: settings.Jump, Kind: Released}, {Action: settings.Jump, Kind: Pressed}}
+			jumpedFor = key
+		case boss.Stage == simulation.BossActive && boss.Attack.ID == "HOS-B" && len(boss.Danger) == 1 && jumpedFor != key:
+			cart := boss.Danger[0]
+			if body.Y < 1 && ((cart.X < body.X && body.X-(cart.X+cart.Width) < 100) || (cart.X > body.X && cart.X-(body.X+body.Width) < 100)) {
+				input.Edges = []ActionEdge{{Action: settings.Jump, Kind: Released}, {Action: settings.Jump, Kind: Pressed}}
+				jumpedFor = key
+			}
+		case body.X > boss.Bounds.X-45:
 			input.Values[0].X = 1
+		case body.X < boss.Bounds.X-60:
+			input.Values[1].X = 1
 		case boss.Stage == simulation.BossRecovery && service.world.PlayerStatus().Action == simulation.FreeAction:
 			input.Edges = []ActionEdge{{Action: settings.Melee, Kind: Released}, {Action: settings.Melee, Kind: Pressed}}
 		}

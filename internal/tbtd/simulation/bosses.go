@@ -72,6 +72,9 @@ type BossView struct {
 	Hits          []BossHit
 	Pending       *campaign.EncounterCandidate
 	Confirmed     bool
+
+	// Danger is the current authoritative warning or active attack geometry.
+	Danger []Rect
 }
 
 type bossState struct {
@@ -200,7 +203,17 @@ func (world *World) Boss(ctx context.Context) BossView {
 		phase.Attacks = slices.Clone(phase.Attacks)
 		phase.Relays = slices.Clone(phase.Relays)
 	}
-	return BossView{Encounter: boss.definition.Encounter, Health: boss.health, Phase: boss.phase + 1, PhaseData: phase, AttackIndex: boss.index, Attack: boss.attack(), Stage: boss.stage, Elapsed: boss.elapsed, Remaining: max(0, boss.duration()-boss.elapsed), Protected: !boss.exposed(), LockedTargets: boss.locked, Markers: boss.markers, Bounds: boss.bounds, Relays: boss.relays, StaggerTicks: stagger, Hits: boss.hits, Pending: boss.pending, Confirmed: boss.stage == BossDefeated}
+	var danger []Rect
+	switch boss.stage {
+	case BossTelegraph:
+		danger = bossWarningAreas(boss.attack(), boss.markers)
+	case BossActive:
+		danger = bossWarningAreas(boss.attack(), boss.locked)
+		if boss.attack().ID == "HOS-B" && len(boss.locked) == 1 {
+			danger = []Rect{hospitalTrolley(boss.locked[0], boss.elapsed)}
+		}
+	}
+	return BossView{Encounter: boss.definition.Encounter, Health: boss.health, Phase: boss.phase + 1, PhaseData: phase, AttackIndex: boss.index, Attack: boss.attack(), Stage: boss.stage, Elapsed: boss.elapsed, Remaining: max(0, boss.duration()-boss.elapsed), Protected: !boss.exposed(), LockedTargets: boss.locked, Markers: boss.markers, Danger: danger, Bounds: boss.bounds, Relays: boss.relays, StaggerTicks: stagger, Hits: boss.hits, Pending: boss.pending, Confirmed: boss.stage == BossDefeated}
 }
 
 // StepBoss executes one encounter tick with the normal player, interaction,

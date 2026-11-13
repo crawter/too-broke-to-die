@@ -159,6 +159,17 @@ type VisualPart struct {
 	Asset content.PresentationID
 
 	Animation content.PresentationID
+
+	// Export and Source select an explicitly authored rectangle in the cache's
+	// manifest-order exports. Offset and Size are logical world pixels relative
+	// to the entity's bottom-centre pivot; they never affect collision.
+	Export int
+
+	Source WorldRect
+
+	Offset Point
+
+	Size Point
 }
 
 // EntityView provides permitted transient drawing data. Interpolation is visual
@@ -177,6 +188,17 @@ type EntityView struct {
 	Y float64
 
 	Parts []VisualPart
+
+	// Kind and State are authoritative semantic identities, not sprite handles.
+	Kind string
+
+	State string
+
+	Facing int
+
+	Width float64
+
+	Height float64
 }
 
 // EventParameter is a semantic text or audio cue argument, not a native handle.
@@ -217,6 +239,8 @@ type PlayerView struct {
 
 	SelectedPayload string
 
+	SelectedSocket string
+
 	Feces int
 
 	Immune bool
@@ -224,6 +248,20 @@ type PlayerView struct {
 	Channel string
 
 	ChannelProgress float64
+
+	Action string
+
+	AttackPhase string
+
+	AttackStart uint64
+
+	AttackReleased bool
+
+	Velocity Point
+
+	Grounded bool
+
+	Facing int
 }
 
 // Point is a world-space presentation coordinate, not a native graphics type.
@@ -237,11 +275,20 @@ type Point struct {
 type AimView struct {
 	Visible bool
 
+	// Reticle is a logical-canvas mouse position, independent of camera shake.
+	Reticle ReticleInput
+
+	// Direction is the current normalized world-space controller aim.
+	Direction Point
+
 	Trajectory []Point
 
 	Impact Point
 
 	HasImpact bool
+
+	// ImpactKind distinguishes terrain, valid receptors and other blockers.
+	ImpactKind string
 }
 
 // BossView describes the current transient encounter without exposing it.
@@ -255,6 +302,57 @@ type BossView struct {
 	Phase int
 
 	Protected bool
+}
+
+// WorldRect uses world coordinates with positive Y upward.
+type WorldRect struct {
+	X, Y, Width, Height float64
+}
+
+// WorldMarker describes an authoritative, non-decorative world indication.
+type WorldMarker struct {
+	ID, Kind, State, Label string
+	Bounds                 WorldRect
+}
+
+// EffectEvent records a transient simulation event, not gameplay state.
+// Tick and Ordinal identify it within one restored world.
+type EffectEvent struct {
+	Tick      uint64
+	Ordinal   uint32
+	Entity    string
+	Kind      string
+	Asset     content.PresentationID
+	Part      VisualPart
+	Position  Point
+	Direction int
+	Heavy     bool
+}
+
+// SceneryLayer binds an authored texture region to its world-space bounds.
+// Depth is 0 for distant scenery, 1 for rear machinery, or 2 for terrain.
+type SceneryLayer struct {
+	Asset  content.PresentationID
+	Export int
+	Source WorldRect
+	Bounds WorldRect
+	Depth  int
+}
+
+// WorldView contains the current encounter presentation inputs. It never owns
+// simulation objects; all collections are copied at the FrameView boundary.
+type WorldView struct {
+	Location   content.LocationID
+	Encounter  content.EncounterID
+	Background content.PresentationID
+	Tick       uint64
+	Fraction   float64
+	BossLocked bool
+	Terrain    []WorldRect
+	Scenery    []SceneryLayer
+	Effects    []EffectEvent
+	Markers    []WorldMarker
+	Landings   []WorldRect
 }
 
 // TextView presents a semantic dialogue, objective, notice or sound caption.
@@ -347,6 +445,8 @@ type FrameViewData struct {
 
 	Aim AimView
 
+	World WorldView
+
 	Tracked content.DeedID
 
 	Texts []TextView
@@ -413,6 +513,11 @@ func cloneFrameView(data FrameViewData) FrameViewData {
 	data.Progress.Incidents = slices.Clone(data.Progress.Incidents)
 	data.Progress.Narratives = slices.Clone(data.Progress.Narratives)
 	data.Aim.Trajectory = slices.Clone(data.Aim.Trajectory)
+	data.World.Terrain = slices.Clone(data.World.Terrain)
+	data.World.Scenery = slices.Clone(data.World.Scenery)
+	data.World.Effects = slices.Clone(data.World.Effects)
+	data.World.Markers = slices.Clone(data.World.Markers)
+	data.World.Landings = slices.Clone(data.World.Landings)
 	data.Texts = slices.Clone(data.Texts)
 	data.Menu = slices.Clone(data.Menu)
 	data.Choices = slices.Clone(data.Choices)

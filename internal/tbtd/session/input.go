@@ -21,6 +21,8 @@ type inputQueue struct {
 	edges []simulation.PlayerEdge
 
 	resumeBlocked bool
+
+	reticle ReticleInput
 }
 
 func (input *inputQueue) sample(ctx context.Context, frame FrameInput, disconnected bool) []ActionEdge {
@@ -32,6 +34,10 @@ func (input *inputQueue) sample(ctx context.Context, frame FrameInput, disconnec
 		clear(input.held)
 	}
 	input.resumeBlocked = frame.ResumeBlocked
+	input.reticle = frame.Reticle
+	if frame.Focus == FocusLost || disconnected {
+		input.reticle.Visible = false
+	}
 	var accepted []ActionEdge
 	for _, edge := range frame.Edges {
 		if disconnected && edge.Kind == Pressed {
