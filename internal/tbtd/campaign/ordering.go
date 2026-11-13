@@ -155,6 +155,18 @@ const (
 
 	// StoryEnding completes the named ending scene or acknowledges the tableau.
 	StoryEnding StoryAction = "ending"
+
+	// StoryTheft records the deliberate donation theft and begins the pursuit.
+	StoryTheft StoryAction = "theft"
+
+	// StorySceneEnter records an independent narrative's first unit before playback.
+	StorySceneEnter StoryAction = "scene_enter"
+
+	// StorySceneUnit records the entry of the next unfinished unit.
+	StorySceneUnit StoryAction = "scene_unit"
+
+	// StorySceneFinish acknowledges playback of an already certified closure.
+	StorySceneFinish StoryAction = "scene_finish"
 )
 
 // StoryChange carries only the identity appropriate to its action. A canceled
@@ -165,6 +177,20 @@ type StoryChange struct {
 	Narrative content.NarrativeID `json:"narrative,omitempty"`
 
 	Stage EndingStage `json:"stage,omitempty"`
+
+	Unit string `json:"unit,omitempty"`
+}
+
+// ClosureCandidate is a completed protected closure-terminal interaction.
+// SceneUnit identifies the first authored unit entered with the receipt.
+type ClosureCandidate struct {
+	Deed content.DeedID `json:"deed"`
+
+	Terminal content.ObjectID `json:"terminal"`
+
+	HoldMilliseconds int64 `json:"hold_ms"`
+
+	SceneUnit string `json:"scene_unit"`
 }
 
 // Transition is one immutable request. Sequence starts at one and is assigned
@@ -183,6 +209,8 @@ type Transition struct {
 	Checkpoint content.AnchorID `json:"checkpoint,omitempty"`
 
 	Certification *CertificationCandidate `json:"certification,omitempty"`
+
+	Closure *ClosureCandidate `json:"closure,omitempty"`
 
 	CriticalItems []CriticalItemCandidate `json:"critical_items,omitempty"`
 
@@ -208,9 +236,6 @@ func (campaign *Campaign) Prepare(ctx context.Context, snapshot Snapshot, transi
 	if err = campaign.Validate(ctx, snapshot); err != nil {
 		return Snapshot{}, err
 	}
-	if snapshot.data.Consent && transition.Story == nil {
-		return Snapshot{}, fmt.Errorf("%w: ending has begun", ErrBlocked)
-	}
 	if !campaignIDPattern.MatchString(transition.CampaignID) || transition.Sequence == 0 || (snapshot.data.CampaignID != "" && snapshot.data.CampaignID != transition.CampaignID) {
 		return Snapshot{}, fmt.Errorf("%w: campaign or operation identity", ErrInvalid)
 	}
@@ -233,8 +258,11 @@ func (campaign *Campaign) Prepare(ctx context.Context, snapshot Snapshot, transi
 	if snapshot.data.OperationSequence == math.MaxUint64 || transition.Sequence != snapshot.data.OperationSequence+1 {
 		return Snapshot{}, fmt.Errorf("%w: stale or nonconsecutive operation", ErrConflict)
 	}
+	if (snapshot.data.Consent || snapshot.data.SceneEntry != "") && transition.Story == nil {
+		return Snapshot{}, fmt.Errorf("%w: ending has begun", ErrBlocked)
+	}
 	if transition.Story != nil || transition.Checkpoint != "" {
-		if (transition.Story != nil && transition.Checkpoint != "") || transition.Attempt != nil || transition.Certification != nil || len(transition.CriticalItems) != 0 || transition.Encounter != nil || transition.Aftermath != "" || len(transition.Contacts) != 0 || transition.Failure || transition.Death != DeathNone || transition.DeathDetail != "" {
+		if (transition.Story != nil && transition.Checkpoint != "") || transition.Attempt != nil || transition.Certification != nil || transition.Closure != nil || len(transition.CriticalItems) != 0 || transition.Encounter != nil || transition.Aftermath != "" || len(transition.Contacts) != 0 || transition.Failure || transition.Death != DeathNone || transition.DeathDetail != "" {
 			return Snapshot{}, fmt.Errorf("%w: story or checkpoint change must be a separate operation", ErrInvalid)
 		}
 		if transition.Story != nil {
@@ -263,6 +291,15 @@ func (campaign *Campaign) Prepare(ctx context.Context, snapshot Snapshot, transi
 	}
 	active, _ := snapshot.activeAttempt(ctx)
 	proposed := Snapshot{data: snapshot.Data(ctx)}
+	if transition.Closure != nil {
+		if transition.Attempt != nil || transition.Certification != nil || transition.Encounter != nil || len(transition.CriticalItems) != 0 || transition.Aftermath != "" || len(transition.Contacts) != 0 || transition.Failure {
+			return Snapshot{}, fmt.Errorf("%w: closure must not mix other candidates", ErrInvalid)
+		}
+		proposed, err = campaign.prepareClosure(ctx, proposed, *transition.Closure)
+		if err != nil {
+			return Snapshot{}, err
+		}
+	}
 	if transition.Attempt != nil {
 		if transition.Certification != nil || len(transition.CriticalItems) != 0 || transition.Encounter != nil || transition.Aftermath != "" || len(transition.Contacts) != 0 || transition.Failure || transition.Death != DeathNone {
 			return Snapshot{}, fmt.Errorf("%w: attempt change must be a separate operation", ErrInvalid)

@@ -150,6 +150,12 @@ func (world *World) SuspendPlayer(ctx context.Context) {
 	world.limbs.removeHeld = false
 	world.limbs.payloadHeld = false
 	world.limbs.throwPending = ""
+	world.objects.held = false
+	world.objects.channel = interactionChannel{}
+	if world.motion.action == InteractionAction {
+		world.motion.action = FreeAction
+		world.motion.actionUntil = 0
+	}
 }
 
 // ResumePlayer requires the session's current held controls, so an input held

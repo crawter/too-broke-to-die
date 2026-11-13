@@ -32,6 +32,8 @@ type Definitions struct {
 
 	Endings []Ending `json:"endings"`
 
+	Scenes []Scene `json:"scenes,omitempty"`
+
 	Gates []Gate `json:"gates"`
 
 	Presentations []Presentation `json:"presentations"`
@@ -321,6 +323,10 @@ func cloneDefinitions(ctx context.Context, source Definitions) Definitions {
 	copy.Consequences = append([]Consequence(nil), source.Consequences...)
 	copy.Emergencies = append([]Emergency(nil), source.Emergencies...)
 	copy.Endings = append([]Ending(nil), source.Endings...)
+	copy.Scenes = append([]Scene(nil), source.Scenes...)
+	for i := range copy.Scenes {
+		copy.Scenes[i].Units = append([]SceneUnit(nil), source.Scenes[i].Units...)
+	}
 	copy.Gates = append([]Gate(nil), source.Gates...)
 	for i := range copy.Gates {
 		copy.Gates[i].Deeds = append([]DeedID(nil), source.Gates[i].Deeds...)

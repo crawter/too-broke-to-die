@@ -116,6 +116,7 @@ func validateDefinitions(ctx context.Context, d Definitions, mode Mode) (err err
 	sort.Slice(d.Consequences, func(i, j int) bool { return d.Consequences[i].ID < d.Consequences[j].ID })
 	sort.Slice(d.Emergencies, func(i, j int) bool { return d.Emergencies[i].ID < d.Emergencies[j].ID })
 	sort.Slice(d.Endings, func(i, j int) bool { return d.Endings[i].ID < d.Endings[j].ID })
+	sort.Slice(d.Scenes, func(i, j int) bool { return d.Scenes[i].ID < d.Scenes[j].ID })
 	sort.Slice(d.Gates, func(i, j int) bool { return d.Gates[i].ID < d.Gates[j].ID })
 	sort.Slice(d.Presentations, func(i, j int) bool { return d.Presentations[i].ID < d.Presentations[j].ID })
 
@@ -161,6 +162,9 @@ func validateDefinitions(ctx context.Context, d Definitions, mode Mode) (err err
 	}
 	presentations, err := index(d.Presentations, func(v Presentation) PresentationID { return v.ID }, validPresentationID)
 	if err != nil {
+		return err
+	}
+	if err = validateScenes(ctx, d.Scenes, narratives, endings, presentations); err != nil {
 		return err
 	}
 	fontIDs := []PresentationID{d.Fonts.Regular, d.Fonts.SemiBold, d.Fonts.Bold}

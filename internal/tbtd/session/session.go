@@ -64,6 +64,10 @@ type Service struct {
 
 	replay bool
 
+	scenes map[string]content.Scene
+
+	scene scenePlayback
+
 	failureHandled bool
 
 	events []SemanticEvent
@@ -137,7 +141,9 @@ func (service *Service) HandleFrame(ctx context.Context, command FrameCommand) (
 	}
 	if service.confirmation != "" {
 		input := command.Data(ctx)
-		input.Selections = slices.DeleteFunc(input.Selections, func(selection MenuSelection) bool { return selection.Action == "resume" })
+		if service.confirmation != "scene_skip" && service.confirmation != "consent" {
+			input.Selections = slices.DeleteFunc(input.Selections, func(selection MenuSelection) bool { return selection.Action == "resume" })
+		}
 		input.Edges = slices.DeleteFunc(input.Edges, func(edge ActionEdge) bool {
 			return edge.Kind == Pressed && (edge.Action == settings.Pause || edge.Action == settings.Ledger)
 		})
@@ -146,6 +152,8 @@ func (service *Service) HandleFrame(ctx context.Context, command FrameCommand) (
 			return FrameView{}, err
 		}
 	}
+	beforeState := service.policy.State()
+	confirmHeld := service.policy.input.held[settings.MenuConfirm]
 	decision, err := service.policy.BeginFrame(ctx, command)
 	if err != nil {
 		return FrameView{}, err
@@ -162,7 +170,16 @@ func (service *Service) HandleFrame(ctx context.Context, command FrameCommand) (
 			return FrameView{}, err
 		}
 		service.confirmation = "quit_to_title"
+	} else if decision.CloseRequested && service.pending == nil && service.policy.State() == StateScene {
+		if err = service.policy.Transition(ctx, OpenPause, ""); err != nil {
+			return FrameView{}, err
+		}
+		service.confirmationTarget = service.confirmation
+		service.confirmation = "quit_to_title"
 	} else if decision.CloseRequested && service.pending == nil && (service.policy.State() == StatePause || service.policy.State() == StateDead) {
+		if service.confirmation != "quit_to_title" {
+			service.confirmationTarget = service.confirmation
+		}
 		service.confirmation = "quit_to_title"
 	}
 	if !decision.Interrupted {
@@ -177,11 +194,26 @@ func (service *Service) HandleFrame(ctx context.Context, command FrameCommand) (
 			}
 		}
 	}
+	if !decision.Interrupted && beforeState == StateScene && decision.State == StateScene && len(decision.Selections) == 0 {
+		if err = service.sceneInput(ctx, command.Data(ctx), confirmHeld); err != nil {
+			service.policy.scene.Freeze()
+			return FrameView{}, err
+		}
+	} else if beforeState == StateScene && decision.State != StateScene {
+		service.scene.pressed, service.scene.hold = false, 0
+	}
+	if service.confirmation != "" && service.policy.State() == StateScene {
+		service.policy.scene.Freeze()
+	}
 	var stepErr error
 	for {
 		kind, input, ok := service.policy.NextTick(ctx)
 		if !ok {
 			break
+		}
+		if kind == SceneTick {
+			service.tickScene()
+			continue
 		}
 		if kind == GameplayTick {
 			if err = service.step(ctx, input); err != nil {
@@ -256,6 +288,12 @@ func (service *Service) view(ctx context.Context) (_ FrameView, err error) {
 			label = service.pending.label
 		}
 		data.Warning = "Несохранённое событие может быть потеряно: " + label
+	case "scene_skip":
+		data.Warning = "Пропустить сцену: " + service.scene.definition.ID + "?"
+	case "consent":
+		data.Warning = "Согласен умереть окончательно. Далее следует канонический финал."
+	case "steal_donations":
+		data.Warning = "Украсть пожертвования на лечение рака?"
 	case "reset_request", "abandon_request":
 		data.Warning = "Незачтённый прогресс попытки будет сброшен. Зачтённые дела и штрафы сохраняются"
 	}
@@ -278,6 +316,14 @@ func (service *Service) view(ctx context.Context) (_ FrameView, err error) {
 		} else {
 			data.Choices = []RecoveryChoice{ExitGame}
 		}
+	}
+	if len(service.scene.definition.Units) != 0 && service.scene.unit < len(service.scene.definition.Units) {
+		unit := service.scene.definition.Units[service.scene.unit]
+		data.Scene = SceneView{ID: service.scene.definition.ID, Unit: unit.ID, Narrative: service.scene.definition.Narrative, Ending: service.scene.definition.Ending, Ticks: service.scene.ticks, Background: unit.Background, Replay: service.replay}
+		if service.replay {
+			data.Scene.ReplayLabel = "Повтор финала"
+		}
+		data.Texts = append(data.Texts, TextView{ID: unit.TextID, Speaker: unit.Speaker, Text: unit.Text, Direction: unit.Direction})
 	}
 	if service.world != nil {
 		previous, current := service.world.Snapshot(ctx).Data(ctx)

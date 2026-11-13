@@ -9,6 +9,7 @@ import (
 	"math"
 	"reflect"
 	"slices"
+	"time"
 
 	monkit "github.com/spacemonkeygo/monkit/v3"
 
@@ -17,6 +18,18 @@ import (
 )
 
 var mon = monkit.Package()
+
+// PermitReviewTarget identifies Vera's protected review counter in the return lobby.
+const PermitReviewTarget = "station-ANC-MIN-PERMIT-REVIEW"
+
+// PrologueDonationTarget identifies the explicit donation theft interaction.
+const PrologueDonationTarget = "DONATION-BOX"
+
+// HospitalPassageTarget identifies the church-to-hospital passage.
+const HospitalPassageTarget = "PASSAGE-HOSPITAL"
+
+// InstitutePassageTarget identifies the ministry-to-institute passage.
+const InstitutePassageTarget = "PASSAGE-INSTITUTE"
 
 // World is the sole owner of its transient state. It is not concurrent-safe.
 type World struct {
@@ -129,6 +142,19 @@ func NewWorld(ctx context.Context, owner *campaign.Campaign, manifest *content.C
 		if prologue.Anchor == plan.Anchor {
 			found = true
 			world.state.Encounter, bounds, floor, solids, lethal, spawn = prologue.Encounter, prologue.Bounds, prologue.Floor, prologue.Solids, prologue.Lethal, prologue.Spawn
+			if plan.Pursuit {
+				spawn = prologue.Entry
+			}
+			if prologue.Encounter == "ENC-PRO-01" {
+				for _, feature := range prologue.Features {
+					if feature.ID == PrologueDonationTarget {
+						world.state.Entities = append(world.state.Entities, Entity{ID: PrologueDonationTarget, Role: content.RoleTerminal, Position: Vector{X: feature.X + feature.Width/2, Y: feature.Y}, Protected: true})
+					}
+				}
+			}
+			if prologue.Encounter == "ENC-PRO-03" && slices.Contains(committed.Data(ctx).Narratives, content.NarrativeID("NAR-03")) && !slices.Contains(committed.Data(ctx).Narratives, content.NarrativeID("NAR-04")) {
+				world.state.Entities = append(world.state.Entities, Entity{ID: HospitalPassageTarget, Role: content.RoleTerminal, Position: Vector{X: prologue.Objective.X, Y: prologue.Objective.Y}, Protected: true})
+			}
 			for i, platform := range prologue.Platforms {
 				colliders = append(colliders, Collider{ID: fmt.Sprintf("prologue-platform-%03d", i), Kind: OneWay, Bounds: rectFromContent(platform)})
 			}
@@ -155,6 +181,9 @@ func NewWorld(ctx context.Context, owner *campaign.Campaign, manifest *content.C
 			Entity{ID: boss.Terminal, Role: content.RoleTerminal, Position: Vector{X: boss.TerminalPosition.X, Y: boss.TerminalPosition.Y}, Protected: true},
 			Entity{ID: content.ObjectID("station-" + string(boss.Encounter) + "-CHECKPOINT"), Role: content.RoleCheckpoint, Position: Vector{X: boss.Checkpoint.X, Y: boss.Checkpoint.Y}, Protected: true},
 		)
+		if plan.Anchor == "ANC-MIN-OUT" && slices.Contains(committed.Data(ctx).Narratives, content.NarrativeID("NAR-07")) && !slices.Contains(committed.Data(ctx).Narratives, content.NarrativeID("NAR-08")) {
+			world.state.Entities = append(world.state.Entities, Entity{ID: InstitutePassageTarget, Role: content.RoleTerminal, Position: Vector{X: boss.Exit.X, Y: boss.Exit.Y}, Protected: true})
+		}
 		for i, refill := range boss.Refills {
 			world.state.Entities = append(world.state.Entities, Entity{ID: content.ObjectID(fmt.Sprintf("station-%s-REFILL-%03d", boss.Encounter, i)), Role: content.RoleRefill, Position: Vector{X: refill.X, Y: refill.Y}, Protected: true})
 		}
@@ -165,6 +194,7 @@ func NewWorld(ctx context.Context, owner *campaign.Campaign, manifest *content.C
 			found = true
 			bounds, floor, solids, lethal, spawn = lobby.Bounds, lobby.Floor, lobby.Solids, lobby.Lethal, lobby.Spawn
 			world.state.Encounter = "ENC-MIN-05"
+			world.state.Entities = append(world.state.Entities, Entity{ID: PermitReviewTarget, Role: content.RoleTerminal, Position: Vector{X: lobby.Counter.X, Y: lobby.Counter.Y}, Protected: true})
 		}
 	}
 	for _, room := range location.Bays {
@@ -344,6 +374,23 @@ func NewWorld(ctx context.Context, owner *campaign.Campaign, manifest *content.C
 	}
 	if err = world.installAuthoredInteractions(ctx); err != nil {
 		return nil, err
+	}
+	for _, deed := range manifest.Deeds(ctx) {
+		if deed.Family != "END" || deed.Deed.Encounter != world.state.Encounter {
+			continue
+		}
+		if len(deed.Deed.Objects) != 1 || deed.Deed.HoldMilliseconds <= 0 || deed.Deed.HoldMilliseconds > 600000 {
+			return nil, fmt.Errorf("invalid closure definition %s", deed.Deed.ID)
+		}
+		ticks, tickErr := DurationTicks(time.Duration(deed.Deed.HoldMilliseconds) * time.Millisecond)
+		if tickErr != nil || ticks <= 0 || ticks > 72000 {
+			return nil, fmt.Errorf("invalid closure hold %s", deed.Deed.ID)
+		}
+		for i := range world.objects.interactions {
+			if world.objects.interactions[i].ID == string(deed.Deed.Objects[0]) {
+				world.objects.interactions[i].HoldTicks = int(ticks)
+			}
+		}
 	}
 	if err = world.installService(ctx, manifest, bays, committed); err != nil {
 		return nil, err

@@ -267,6 +267,32 @@ func (world *World) StepBoss(ctx context.Context, command ObjectCommand) (err er
 	return nil
 }
 
+// ClosureInteraction returns a candidate only for the authored terminal's
+// completed hold after the corresponding boss victory was acknowledged.
+func (world *World) ClosureInteraction(ctx context.Context, manifest *content.Campaign) (_ *campaign.ClosureCandidate, err error) {
+	defer mon.Task()(&ctx)(&err)
+	if world == nil || manifest == nil || world.boss.stage != BossDefeated {
+		return nil, nil
+	}
+	for _, deed := range manifest.Deeds(ctx) {
+		if deed.Family != "END" || deed.Deed.Encounter != world.boss.definition.Encounter {
+			continue
+		}
+		if len(deed.Deed.Objects) != 1 {
+			return nil, fmt.Errorf("invalid closure terminal %s", deed.Deed.ID)
+		}
+		if slices.Contains(world.state.Receipts, deed.Deed.ID) {
+			return nil, nil
+		}
+		for _, event := range world.objects.events {
+			if event.Kind == "completed" && event.Target == string(deed.Deed.Objects[0]) {
+				return &campaign.ClosureCandidate{Deed: deed.Deed.ID, Terminal: deed.Deed.Objects[0], HoldMilliseconds: deed.Deed.HoldMilliseconds}, nil
+			}
+		}
+	}
+	return nil, nil
+}
+
 // PrepareBoss combines the stable victory candidate with other same-tick
 // candidates. The campaign assigns the occurrence once per operation sequence.
 func (world *World) PrepareBoss(ctx context.Context, owner *campaign.Campaign, committed campaign.Snapshot, transition campaign.Transition) (_ campaign.Snapshot, err error) {

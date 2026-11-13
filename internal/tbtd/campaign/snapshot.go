@@ -71,6 +71,15 @@ type State struct {
 
 	Ending EndingStage `json:"ending"`
 
+	// DonationTheft records the deliberate prologue theft before the pursuit.
+	DonationTheft bool `json:"donation_theft,omitempty"`
+
+	// SceneEntry identifies an unfinished independent or already-certified closure scene.
+	SceneEntry content.NarrativeID `json:"scene_entry,omitempty"`
+
+	// SceneUnit is the stable identity of the unfinished unit, or empty for the first.
+	SceneUnit string `json:"scene_unit,omitempty"`
+
 	TableauAcknowledged bool `json:"tableau_acknowledged"`
 
 	Completed bool `json:"completed"`
@@ -209,12 +218,16 @@ func (campaign *Campaign) Validate(ctx context.Context, snapshot Snapshot) (err 
 		}
 	}
 	if data.Anchor != "" {
-		valid := (data.Anchor == "ANC-PRO-01" && len(data.Narratives) == 0) ||
+		valid := (data.DonationTheft && len(data.Narratives) == 0 && data.Anchor == "ANC-PRO-02") ||
+			(data.SceneEntry == "NAR-01" && data.Anchor == "ANC-PRO-02") ||
+			(data.SceneEntry == "NAR-04" && data.Anchor == "ANC-HOS-01") ||
+			(data.SceneEntry == "NAR-08" && data.Anchor == "ANC-INS-01") ||
+			(data.Anchor == "ANC-PRO-01" && len(data.Narratives) == 0) ||
 			(data.Anchor == "ANC-PRO-02" && has(data.Narratives, content.NarrativeID("NAR-01")) && !has(data.Narratives, content.NarrativeID("NAR-02"))) ||
 			(data.Anchor == "ANC-PRO-03" && has(data.Narratives, content.NarrativeID("NAR-02"))) ||
 			(data.Anchor == "ANC-HOS-01" && has(data.Narratives, content.NarrativeID("NAR-04"))) ||
 			(data.Anchor == "ANC-INS-01" && has(data.Narratives, content.NarrativeID("NAR-08"))) ||
-			(data.Anchor == "ANC-MIN-PERMIT" && data.Permit) ||
+			(data.Anchor == "ANC-MIN-PERMIT" && (data.Permit || (len(data.Receipts) == 100 && has(data.Narratives, content.NarrativeID("NAR-09"))))) ||
 			(data.Consent && data.Anchor == endingAnchor(data.Ending)) ||
 			campaign.reachableEncounterAnchor(ctx, data, data.Anchor)
 		for _, receipt := range data.Receipts {
