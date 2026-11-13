@@ -31,6 +31,7 @@ type World struct {
 	objects   objectState
 	service   serviceState
 	encounter encounterState
+	boss      bossState
 }
 
 // TickInput supplies one actor's velocity and the one-way platform currently
@@ -144,6 +145,12 @@ func NewWorld(ctx context.Context, owner *campaign.Campaign, manifest *content.C
 			colliders = append(colliders, Collider{ID: fmt.Sprintf("boss-platform-%03d", i), Kind: OneWay, Bounds: rectFromContent(platform)})
 		}
 		world.state.BossActive = !slices.Contains(plan.Defeated, boss.Encounter)
+		if err = world.installBoss(ctx, boss, plan, committed); err != nil {
+			return nil, err
+		}
+		for _, protection := range boss.Protection {
+			world.combat.protection = append(world.combat.protection, rectFromContent(protection))
+		}
 		world.state.Entities = append(world.state.Entities,
 			Entity{ID: boss.Terminal, Role: content.RoleTerminal, Position: Vector{X: boss.TerminalPosition.X, Y: boss.TerminalPosition.Y}, Protected: true},
 			Entity{ID: content.ObjectID("station-" + string(boss.Encounter) + "-CHECKPOINT"), Role: content.RoleCheckpoint, Position: Vector{X: boss.Checkpoint.X, Y: boss.Checkpoint.Y}, Protected: true},
