@@ -36,6 +36,8 @@ type Service struct {
 
 	bossArena *simulation.BossArena
 
+	worldGeneration uint64
+
 	committed campaign.Snapshot
 
 	id CampaignID
@@ -258,7 +260,12 @@ func (service *Service) bindBossArena(ctx context.Context) (err error) {
 			return fmt.Errorf("boss arena: %w", err)
 		}
 	}
+	if service.worldGeneration == math.MaxUint64 {
+		return fmt.Errorf("%w: world generation exhausted", Internal)
+	}
 	service.bossWorld, service.bossArena = service.world, arena
+	service.worldGeneration++
+	service.effects = nil
 	return nil
 }
 

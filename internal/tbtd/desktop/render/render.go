@@ -26,13 +26,14 @@ var mon = monkit.Package()
 // Renderer borrows cache resources; its owner must keep the OS thread locked
 // and the cache alive until Close. Draw does not begin or end the window frame.
 type Renderer struct {
-	cache   *assets.Cache
-	thread  assets.ThreadID
-	owner   uint64
-	camera  Camera
-	effects effectPool
-	room    content.EncounterID
-	closed  bool
+	cache      *assets.Cache
+	thread     assets.ThreadID
+	owner      uint64
+	camera     Camera
+	effects    effectPool
+	room       content.EncounterID
+	generation uint64
+	closed     bool
 }
 
 // New constructs a renderer without allocating native resources.
@@ -85,11 +86,7 @@ func (renderer *Renderer) Draw(ctx context.Context, view session.FrameView, widt
 	if err != nil {
 		return input.Viewport{}, err
 	}
-	if data.World.Encounter != renderer.room {
-		renderer.camera = Camera{}
-		renderer.effects.reset(ctx)
-		renderer.room = data.World.Encounter
-	}
+	renderer.enterWorld(ctx, data.World)
 	if err = renderer.effects.update(ctx, data.World.Tick, data.World.Effects, access); err != nil {
 		return input.Viewport{}, err
 	}
@@ -154,13 +151,10 @@ func (renderer *Renderer) Draw(ctx context.Context, view session.FrameView, widt
 				break
 			}
 		}
-		if entity == nil || len(entity.Parts) == 0 {
-			return viewport, content.ErrInvalid.New("%s: missing animation frame and layer handoff", item.asset)
+		if err = validateActorHandoff(ctx, item.asset, entity); err != nil {
+			return viewport, err
 		}
 		for _, part := range entity.Parts {
-			if part.Animation != item.asset || part.Asset == "" {
-				return viewport, content.ErrInvalid.New("%s: invalid animation layer %s", item.asset, part.Slot)
-			}
 			textures, textureErr := renderer.cache.Texture(ctx, string(part.Asset))
 			if textureErr != nil {
 				return viewport, textureErr
@@ -175,12 +169,18 @@ func (renderer *Renderer) Draw(ctx context.Context, view session.FrameView, widt
 			sprites = append(sprites, sprite{texture: texture, part: part, point: item.point, facing: entity.Facing})
 		}
 	}
+	effectItems, err := renderer.effects.plan(ctx, access)
+	if err != nil {
+		return viewport, err
+	}
+	type stainSprite struct {
+		sprite sprite
+		alpha  uint8
+	}
 	var effects []sprite
-	for _, effect := range renderer.effects.active {
-		part := effect.event.Part
-		if part.Asset != effect.event.Asset {
-			return viewport, content.ErrInvalid.New("%s: missing effect frame handoff", effect.event.Asset)
-		}
+	var stains []stainSprite
+	for _, item := range effectItems {
+		part := item.part
 		textures, textureErr := renderer.cache.Texture(ctx, string(part.Asset))
 		if textureErr != nil {
 			return viewport, textureErr
@@ -192,7 +192,15 @@ func (renderer *Renderer) Draw(ctx context.Context, view session.FrameView, widt
 		if err = validatePart(part, texture); err != nil {
 			return viewport, err
 		}
-		effects = append(effects, sprite{texture: texture, part: part, point: effect.event.Position, facing: effect.event.Direction})
+		if !item.visible {
+			continue
+		}
+		image := sprite{texture: texture, part: part, point: item.point, facing: item.facing}
+		if item.stain {
+			stains = append(stains, stainSprite{sprite: image, alpha: item.alpha})
+		} else {
+			effects = append(effects, image)
+		}
 	}
 	font, err := renderer.cache.Font(ctx, "FONT-NOTO-REGULAR")
 	if err != nil {
@@ -212,12 +220,19 @@ func (renderer *Renderer) Draw(ctx context.Context, view session.FrameView, widt
 	for _, sprite := range effects {
 		rl.SetTextureFilter(sprite.texture, rl.FilterBilinear)
 	}
+	for _, stain := range stains {
+		rl.SetTextureFilter(stain.sprite.texture, rl.FilterBilinear)
+	}
 	rl.BeginScissorMode(int32(viewport.X), int32(viewport.Y), int32(viewport.Width), int32(viewport.Height))
 	defer rl.EndScissorMode()
 	worldView := viewport
 	worldView.Target.X -= renderer.effects.shakeOffset(data.World.Tick, access)
 	for _, sprite := range scenery {
 		drawSprite(worldView, sprite)
+	}
+	for _, stain := range stains {
+		source, destination := spriteGeometry(worldView, stain.sprite)
+		rl.DrawTexturePro(stain.sprite.texture, source, destination, rl.Vector2{}, 0, rl.Color{R: 255, G: 255, B: 255, A: stain.alpha})
 	}
 	// Collision edges are guidance, not a replacement for authored terrain.
 	// Keep them above scenery and below actors and essential markers.
@@ -241,6 +256,31 @@ func (renderer *Renderer) Draw(ctx context.Context, view session.FrameView, widt
 		drawReticle(point, float32(viewport.Width/LogicalWidth))
 	}
 	return viewport, nil
+}
+
+// enterWorld drops camera and decorative state after any reconstruction, even
+// if the new world starts at the same encounter and simulation tick.
+func (renderer *Renderer) enterWorld(ctx context.Context, world session.WorldView) {
+	defer mon.Task()(&ctx)(nil)
+	if world.Encounter != renderer.room || world.Generation != renderer.generation {
+		renderer.camera = Camera{}
+		renderer.effects.reset(ctx)
+		renderer.room = world.Encounter
+		renderer.generation = world.Generation
+	}
+}
+
+func validateActorHandoff(ctx context.Context, asset content.PresentationID, entity *session.EntityView) (err error) {
+	defer mon.Task()(&ctx)(&err)
+	if entity == nil || len(entity.Parts) == 0 {
+		return content.ErrInvalid.New("%s: missing animation frame and layer handoff", asset)
+	}
+	for _, part := range entity.Parts {
+		if part.Animation != asset || part.Asset == "" {
+			return content.ErrInvalid.New("%s: invalid animation layer %s", asset, part.Slot)
+		}
+	}
+	return nil
 }
 
 func validPoint(point session.Point) bool {

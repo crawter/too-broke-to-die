@@ -194,6 +194,10 @@ type EntityView struct {
 
 	State string
 
+	// Variant identifies a projectile or detached socket without inventing an
+	// asset ID where the producer has not supplied a binding.
+	Variant string
+
 	Facing int
 
 	Width float64
@@ -318,12 +322,16 @@ type WorldMarker struct {
 // EffectEvent records a transient simulation event, not gameplay state.
 // Tick and Ordinal identify it within one restored world.
 type EffectEvent struct {
-	Tick      uint64
-	Ordinal   uint32
-	Entity    string
-	Kind      string
-	Asset     content.PresentationID
-	Part      VisualPart
+	Tick    uint64
+	Ordinal uint32
+	Entity  string
+	Kind    string
+	Asset   content.PresentationID
+	Part    VisualPart
+	// Particles and Stain are separately authored regions, not generated art.
+	// Their offsets are relative to Position. Stain is required for blood hits.
+	Particles []VisualPart
+	Stain     VisualPart
 	Position  Point
 	Direction int
 	Heavy     bool
@@ -342,8 +350,11 @@ type SceneryLayer struct {
 // WorldView contains the current encounter presentation inputs. It never owns
 // simulation objects; all collections are copied at the FrameView boundary.
 type WorldView struct {
-	Location   content.LocationID
-	Encounter  content.EncounterID
+	Location  content.LocationID
+	Encounter content.EncounterID
+	// Generation changes when the transient world is reconstructed, even at
+	// the same encounter and tick after recovery.
+	Generation uint64
 	Background content.PresentationID
 	Tick       uint64
 	Fraction   float64
@@ -516,6 +527,9 @@ func cloneFrameView(data FrameViewData) FrameViewData {
 	data.World.Terrain = slices.Clone(data.World.Terrain)
 	data.World.Scenery = slices.Clone(data.World.Scenery)
 	data.World.Effects = slices.Clone(data.World.Effects)
+	for i := range data.World.Effects {
+		data.World.Effects[i].Particles = slices.Clone(data.World.Effects[i].Particles)
+	}
 	data.World.Markers = slices.Clone(data.World.Markers)
 	data.World.Landings = slices.Clone(data.World.Landings)
 	data.Texts = slices.Clone(data.Texts)

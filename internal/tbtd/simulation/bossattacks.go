@@ -382,7 +382,9 @@ func (arena *BossArena) SetPresentation(ctx context.Context, presentation BossPr
 // ArenaProjectile is a committed confession projectile. Coordinates and
 // velocity use the same units as the world collision solver.
 type ArenaProjectile struct {
-	ID       string
+	ID string
+	// Attack remains the release identity even if the boss changes phase.
+	Attack   string
 	Position Vector
 	Velocity Vector
 	// Remaining bounds a committed projectile's flight, including a missed target.

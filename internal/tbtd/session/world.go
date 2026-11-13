@@ -142,7 +142,7 @@ func (service *Service) worldView(ctx context.Context, data *FrameViewData) (err
 	combat := service.world.CombatView(ctx)
 	limbs := service.world.LimbView(ctx)
 	boss := service.world.Boss(ctx)
-	data.World = WorldView{Location: current.Location, Encounter: current.Encounter, Tick: current.Tick, Fraction: service.policy.game.Fraction(), BossLocked: boss.Encounter != "" && boss.Stage != simulation.BossDormant && boss.Stage != simulation.BossDefeated, Effects: append([]EffectEvent(nil), service.effects...)}
+	data.World = WorldView{Location: current.Location, Encounter: current.Encounter, Generation: service.worldGeneration, Tick: current.Tick, Fraction: service.policy.game.Fraction(), BossLocked: boss.Encounter != "" && boss.Stage != simulation.BossDormant && boss.Stage != simulation.BossDefeated, Effects: append([]EffectEvent(nil), service.effects...)}
 	encounter := string(current.Encounter)
 	switch {
 	case strings.HasPrefix(encounter, "ENC-PRO-"):
@@ -351,21 +351,30 @@ func (service *Service) worldView(ctx context.Context, data *FrameViewData) (err
 	}
 	for _, projectile := range combat.Projectiles {
 		asset := content.PresentationID("")
+		variant := "enemy:" + code + ":RNG"
 		if projectile.PlayerOwned {
-			asset = "FX-FEC"
+			asset, variant = "FX-FEC", "player:feces"
 		}
-		data.Entities = append(data.Entities, EntityView{ID: projectile.ID, Kind: "projectile", Asset: asset, State: "active", X: projectile.Position.X, Y: projectile.Position.Y, PreviousX: projectile.Position.X, PreviousY: projectile.Position.Y})
+		data.Entities = append(data.Entities, EntityView{ID: projectile.ID, Kind: "projectile", Asset: asset, Variant: variant, State: "active", X: projectile.Position.X, Y: projectile.Position.Y, PreviousX: projectile.Position.X, PreviousY: projectile.Position.Y})
 		data.World.Markers = append(data.World.Markers, WorldMarker{ID: projectile.ID, Kind: "projectile", Bounds: WorldRect{X: projectile.Position.X, Y: projectile.Position.Y}})
 	}
 	for _, limb := range limbs.Objects {
 		if limb.Carried {
 			continue
 		}
-		kind := "limb"
+		state := "settled"
 		if limb.Airborne {
-			kind = "projectile"
+			state = "airborne"
+			if limb.Damaging {
+				state = "damaging"
+			}
 		}
-		data.World.Markers = append(data.World.Markers, WorldMarker{ID: limb.ID, Kind: kind, Label: string(limb.Socket), Bounds: WorldRect{X: limb.Position.X, Y: limb.Position.Y}})
+		data.Entities = append(data.Entities, EntityView{ID: limb.ID, Kind: "limb", Variant: string(limb.Socket), State: state, X: limb.Position.X, Y: limb.Position.Y, PreviousX: limb.Position.X, PreviousY: limb.Position.Y})
+		if limb.Damaging {
+			data.World.Markers = append(data.World.Markers, WorldMarker{ID: limb.ID, Kind: "projectile", Label: string(limb.Socket), Bounds: WorldRect{X: limb.Position.X, Y: limb.Position.Y}})
+		} else if !limb.Airborne {
+			data.World.Markers = append(data.World.Markers, WorldMarker{ID: limb.ID, Kind: "limb", Label: string(limb.Socket), Bounds: WorldRect{X: limb.Position.X, Y: limb.Position.Y}})
+		}
 	}
 	for _, smear := range service.world.FecesView(ctx).Smears {
 		data.World.Markers = append(data.World.Markers, WorldMarker{ID: smear.ID, Kind: "smear", Label: "Скользко", Bounds: WorldRect{X: smear.Position.X, Y: smear.Position.Y}})
@@ -397,7 +406,7 @@ func (service *Service) worldView(ctx context.Context, data *FrameViewData) (err
 		data.Entities = append(data.Entities, EntityView{ID: string(boss.Encounter), Kind: "boss", Asset: bossAsset(boss, code), State: string(boss.Stage), X: bossPosition.X, Y: bossPosition.Y, PreviousX: bossPosition.X, PreviousY: bossPosition.Y, Width: boss.Bounds.Width, Height: boss.Bounds.Height})
 		arena := service.bossArena.View(ctx)
 		for _, shot := range arena.Projectiles {
-			data.Entities = append(data.Entities, EntityView{ID: shot.ID, Kind: "projectile", State: "active", X: shot.Position.X, Y: shot.Position.Y, PreviousX: shot.Position.X, PreviousY: shot.Position.Y})
+			data.Entities = append(data.Entities, EntityView{ID: shot.ID, Kind: "projectile", Variant: "arena:" + shot.Attack, State: "active", X: shot.Position.X, Y: shot.Position.Y, PreviousX: shot.Position.X, PreviousY: shot.Position.Y})
 			data.World.Markers = append(data.World.Markers, WorldMarker{ID: shot.ID, Kind: "projectile", Bounds: WorldRect{X: shot.Position.X, Y: shot.Position.Y}})
 		}
 		if arena.WasteHeight > 0 && arena.WasteDamage > 0 {

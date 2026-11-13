@@ -7,16 +7,109 @@ import (
 	"context"
 	"math"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
 	rl "github.com/gen2brain/raylib-go/raylib"
 
+	"too-broke-to-die/internal/tbtd/campaign"
 	"too-broke-to-die/internal/tbtd/content"
 	"too-broke-to-die/internal/tbtd/desktop/input"
 	"too-broke-to-die/internal/tbtd/session"
 	"too-broke-to-die/internal/tbtd/settings"
 )
+
+// renderStore is a storage-boundary fixture; session and world remain real.
+type renderStore struct {
+	request session.ProgressRequest
+}
+
+func (store *renderStore) Submit(_ context.Context, request session.ProgressRequest) error {
+	store.request = request
+	return nil
+}
+
+func (store *renderStore) Poll(ctx context.Context, id session.RequestID) (session.ProgressResult, error) {
+	return session.NewProgressResult(ctx, session.ProgressResultData{ID: id, Campaign: "00000000-0000-4000-8000-000000000001", Status: session.StorageSucceeded, Revision: 7, RevisionKnown: true, PayloadDigest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Snapshot: campaign.Snapshot{}}), nil
+}
+
+func TestLiveSessionPreparationAndMissingHandoff(t *testing.T) {
+	ctx := context.Background()
+	fsys := os.DirFS("../../../..")
+	catalogue, err := content.LoadCampaign(ctx, fsys, "content/data/campaign.json", "content/data/ru-services.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, err := campaign.New(ctx, catalogue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bays, err := content.LoadServiceBays(ctx, fsys, "content/data/encounters/templates.json", "content/data/encounters/variants.json", catalogue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := session.New(ctx, owner, catalogue, bays, &renderStore{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame := func(input session.FrameInput) session.FrameViewData {
+		t.Helper()
+		command, commandErr := session.NewFrameCommand(ctx, input)
+		if commandErr != nil {
+			t.Fatal(commandErr)
+		}
+		view, frameErr := service.HandleFrame(ctx, command)
+		if frameErr != nil {
+			t.Fatal(frameErr)
+		}
+		return view.Data(ctx)
+	}
+	selectAction := func(action session.MenuAction) session.FrameViewData {
+		t.Helper()
+		return frame(session.FrameInput{Selections: []session.MenuSelection{{Action: action}}})
+	}
+	selectAction("continue")
+	frame(session.FrameInput{})
+	selectAction("resume")
+	view := frame(session.FrameInput{Elapsed: 25 * time.Millisecond, Values: []session.ActionValue{{Action: settings.MoveRight, X: 1}}})
+	items, err := planWorld(ctx, view)
+	if err != nil || view.World.Background != "ART-PRO-01" || len(items) < 2 {
+		t.Fatalf("live world plan: %+v %v", view.World, err)
+	}
+	if err := validateScenery(view.World.Background, 1, view.World.Scenery); err == nil {
+		t.Fatal("missing authored room layout was accepted")
+	}
+	if len(view.Entities) == 0 || len(view.Entities[0].Parts) != 0 {
+		t.Fatal("unexpected authored animation handoff on a media-free checkout")
+	}
+	foundPlayer := false
+	for _, item := range items {
+		if item.entity == "player" {
+			foundPlayer = true
+			if handoffErr := validateActorHandoff(ctx, item.asset, &view.Entities[0]); handoffErr == nil || !content.ErrInvalid.Has(handoffErr) {
+				t.Fatalf("missing player frame was accepted: %v", handoffErr)
+			}
+		}
+	}
+	if !foundPlayer {
+		t.Fatal("live player not planned")
+	}
+	generation := view.World.Generation
+	view = frame(session.FrameInput{Focus: session.FocusLost, Elapsed: time.Second})
+	if view.State != session.StatePause {
+		t.Fatal("focus interruption did not pause")
+	}
+	frame(session.FrameInput{Focus: session.FocusGained})
+	selectAction("return_checkpoint")
+	view = selectAction("confirm")
+	if view.State != session.StatePause || view.World.Generation == generation || view.World.Tick != 0 {
+		t.Fatalf("same-room recovery: %+v", view.World)
+	}
+	if _, err := planWorld(ctx, view); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestCameraAndViewport(t *testing.T) {
 	ctx := context.Background()
@@ -330,6 +423,21 @@ func TestPlanIncludesDynamicBoundEntities(t *testing.T) {
 	}
 }
 
+func TestMissingProjectileAndLimbBindingsNameTheirVariants(t *testing.T) {
+	ctx := context.Background()
+	for _, entity := range []session.EntityView{
+		{ID: "shot", Kind: "projectile", Variant: "enemy:HOS:RNG"},
+		{ID: "arena-shot", Kind: "projectile", Variant: "arena:CHU-C"},
+		{ID: "limb", Kind: "limb", Variant: "LIM-LA", State: "settled"},
+	} {
+		data := session.FrameViewData{World: session.WorldView{Background: "ART-PRO-01"}, Entities: []session.EntityView{entity}}
+		_, err := planWorld(ctx, data)
+		if err == nil || !content.ErrInvalid.Has(err) || !strings.Contains(err.Error(), entity.Variant) || !strings.Contains(err.Error(), entity.ID) {
+			t.Fatalf("missing binding was not identified for %+v: %v", entity, err)
+		}
+	}
+}
+
 func TestMarkerShapesAndEffectLimits(t *testing.T) {
 	seen := make(map[markerShape]bool)
 	for _, kind := range []string{"danger", "refuge", "interaction", "receptor"} {
@@ -355,13 +463,13 @@ func TestMarkerShapesAndEffectLimits(t *testing.T) {
 	}
 	var pool effectPool
 	full := settings.Accessibility{Shake: settings.ShakeFull, Blood: settings.ParticlesFull}
-	if pool.addParticles(800, full) != maxParticles || pool.addParticles(1, full) != 0 {
+	if pool.addParticles(800) != maxParticles || pool.addParticles(1) != 0 {
 		t.Fatal("particle cap")
 	}
 	for i := 0; i < 50; i++ {
-		pool.addStain(time.Duration(i), full)
+		pool.addStain(session.EffectEvent{Tick: uint64(i)})
 	}
-	if len(pool.stains) != 48 || pool.stains[0] != 2 {
+	if len(pool.stains) != 48 || pool.stains[0].Tick != 2 {
 		t.Fatalf("oldest stain not retired: %+v", pool.stains)
 	}
 	distance, life := shakeLimit(true, full)
@@ -373,9 +481,8 @@ func TestMarkerShapesAndEffectLimits(t *testing.T) {
 		t.Fatal("reduced motion shake")
 	}
 	pool.reset(context.Background())
-	full.Blood = settings.ParticlesReduced
-	if pool.addParticles(100, full) != 50 {
-		t.Fatal("reduced particles")
+	if pool.particles != 0 || len(pool.stains) != 0 {
+		t.Fatal("reset retained decorations")
 	}
 }
 
@@ -439,7 +546,7 @@ func TestEffectEventsExpireAndShakeOnlyWorld(t *testing.T) {
 	if err := pool.update(ctx, 100, []session.EffectEvent{hit}, access); err != nil {
 		t.Fatal(err)
 	}
-	if pool.particles != 16 || len(pool.active) != 1 || len(pool.stains) != 1 || pool.shakeOffset(100, access) != 2 {
+	if pool.particles != 1 || len(pool.active) != 1 || len(pool.stains) != 1 || pool.shakeOffset(100, access) != 2 {
 		t.Fatalf("hit: %+v", pool)
 	}
 	if err := pool.update(ctx, 100, []session.EffectEvent{hit}, access); err != nil || len(pool.active) != 1 || len(pool.stains) != 1 {
@@ -458,7 +565,7 @@ func TestEffectEventsExpireAndShakeOnlyWorld(t *testing.T) {
 	}
 	access.Blood = settings.ParticlesReduced
 	removal := session.EffectEvent{Tick: 150, Entity: "player", Kind: "removal", Asset: "FX-BODY", Heavy: true}
-	if err := pool.update(ctx, 150, []session.EffectEvent{removal}, access); err != nil || pool.particles != 8 || pool.shakeOffset(150, access) != 4 {
+	if err := pool.update(ctx, 150, []session.EffectEvent{removal}, access); err != nil || pool.particles != 1 || pool.shakeOffset(150, access) != 4 {
 		t.Fatalf("reduced removal: %+v %v", pool, err)
 	}
 	if pool.shakeOffset(165, access) != 0 {
@@ -475,8 +582,186 @@ func TestEffectEventsExpireAndShakeOnlyWorld(t *testing.T) {
 	}
 }
 
+func TestAuthoredEffectsPlanReductionAndStains(t *testing.T) {
+	ctx := context.Background()
+	part := session.VisualPart{Asset: "FX-BODY", Source: session.WorldRect{Width: 8, Height: 8}, Size: session.Point{X: 4, Y: 4}}
+	event := session.EffectEvent{Tick: 10, Entity: "player", Kind: "hit", Asset: "FX-BODY", Part: part, Stain: part, Position: session.Point{X: 40, Y: 20}, Particles: []session.VisualPart{part, part, part, part}}
+	var pool effectPool
+	full := settings.Accessibility{Blood: settings.ParticlesFull}
+	if err := pool.update(ctx, 10, []session.EffectEvent{event}, full); err != nil {
+		t.Fatal(err)
+	}
+	// The pool must not borrow the frame's mutable authored regions.
+	event.Particles[0].Asset = ""
+	items, err := pool.plan(ctx, full)
+	if err != nil || len(items) != 6 || !items[0].stain || items[0].point != event.Position || pool.particles != 5 {
+		t.Fatalf("full effect plan: %+v %v", items, err)
+	}
+	reduced := settings.Accessibility{Blood: settings.ParticlesReduced}
+	items, err = pool.plan(ctx, reduced)
+	if err != nil {
+		t.Fatal(err)
+	}
+	visible := 0
+	for _, item := range items {
+		if item.visible && !item.stain {
+			visible++
+		}
+	}
+	if visible != 3 {
+		t.Fatalf("reduced spray drew %d regions, want 3", visible)
+	}
+	if err := pool.update(ctx, 58, nil, reduced); err != nil {
+		t.Fatal(err)
+	}
+	items, err = pool.plan(ctx, reduced)
+	if err != nil || len(items) != 1 || !items[0].stain || pool.particles != 0 {
+		t.Fatalf("spray expiry lost stain: %+v %v", items, err)
+	}
+	for i := 0; i < 49; i++ {
+		pool.addStain(session.EffectEvent{Asset: "FX-BODY", Stain: part, Tick: uint64(i)})
+	}
+	items, err = pool.plan(ctx, reduced)
+	if err != nil || len(items) != maxStains || items[0].visible || !items[maxStains-1].visible || items[0].alpha >= items[maxStains-1].alpha {
+		t.Fatalf("stain limit, reduction or fade: %+v %v", items, err)
+	}
+	pool.stains[0].Stain = session.VisualPart{}
+	if _, err := pool.plan(ctx, reduced); err == nil {
+		t.Fatal("reduced effects hid an unresolved stain")
+	}
+	var single effectPool
+	for _, tick := range []uint64{11, 12} {
+		event := session.EffectEvent{Tick: tick, Entity: "player", Kind: "hit", Asset: "FX-BODY", Part: part, Stain: part}
+		if err := single.update(ctx, tick, []session.EffectEvent{event}, full); err != nil {
+			t.Fatal(err)
+		}
+	}
+	feces := session.EffectEvent{Tick: 12, Ordinal: 1, Entity: "shot", Kind: "feces", Asset: "FX-FEC", Part: session.VisualPart{Asset: "FX-FEC"}, Particles: []session.VisualPart{{Asset: "FX-FEC"}}}
+	if err := single.update(ctx, 12, []session.EffectEvent{feces}, full); err != nil {
+		t.Fatal(err)
+	}
+	items, err = single.plan(ctx, reduced)
+	if err != nil || len(items) != 6 || !items[2].visible || items[3].visible || !items[4].visible || !items[5].visible {
+		t.Fatalf("monolithic spray reduction or feces affected: %+v %v", items, err)
+	}
+	renderer := Renderer{room: "ENC-PRO-01", generation: 1, effects: pool}
+	renderer.camera.X = 500
+	renderer.enterWorld(ctx, session.WorldView{Encounter: "ENC-PRO-01", Generation: 1})
+	if renderer.camera.X != 500 || len(renderer.effects.stains) == 0 {
+		t.Fatal("ordinary frame reset presentation state")
+	}
+	renderer.enterWorld(ctx, session.WorldView{Encounter: "ENC-PRO-01", Generation: 2})
+	if renderer.camera.X != 0 || len(renderer.effects.stains) != 0 || len(renderer.effects.active) != 0 {
+		t.Fatal("same-room recovery retained old effects or camera")
+	}
+}
+
+func TestReducedMonolithicSprayCadence(t *testing.T) {
+	ctx := context.Background()
+	part := session.VisualPart{Asset: "FX-BODY", Source: session.WorldRect{Width: 8, Height: 8}, Size: session.Point{X: 4, Y: 4}}
+	full := settings.Accessibility{Blood: settings.ParticlesFull}
+	reduced := settings.Accessibility{Blood: settings.ParticlesReduced}
+	var pool effectPool
+	visibleSpray := func(access settings.Accessibility) bool {
+		t.Helper()
+		items, err := pool.plan(ctx, access)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var visible bool
+		count := 0
+		for _, item := range items {
+			if !item.stain {
+				count++
+				visible = item.visible
+			}
+		}
+		if count != 1 {
+			t.Fatalf("expected one live spray, got %d", count)
+		}
+		return visible
+	}
+	// All events have even ticks and ordinal zero. Each expires before the
+	// next arrives, so active-slice position cannot supply the cadence.
+	for i := 0; i < 3; i++ {
+		tick := uint64(100 + 100*i)
+		event := session.EffectEvent{Tick: tick, Entity: "player", Kind: "hit", Asset: "FX-BODY", Part: part, Stain: part}
+		if err := pool.update(ctx, tick, []session.EffectEvent{event}, full); err != nil {
+			t.Fatal(err)
+		}
+		want := i%2 == 0
+		if !visibleSpray(full) || visibleSpray(reduced) != want || visibleSpray(reduced) != want {
+			t.Fatalf("event %d has unstable full/reduced selection", i)
+		}
+		stains := len(pool.stains)
+		if err := pool.update(ctx, tick, []session.EffectEvent{event, event}, reduced); err != nil {
+			t.Fatal(err)
+		}
+		if len(pool.stains) != stains || len(pool.active) != 1 || visibleSpray(reduced) != want {
+			t.Fatalf("duplicate changed event %d selection", i)
+		}
+		if err := pool.update(ctx, tick+48, []session.EffectEvent{event}, reduced); err != nil {
+			t.Fatal(err)
+		}
+		if len(pool.active) != 0 || pool.particles != 0 {
+			t.Fatalf("expired event %d survived", i)
+		}
+	}
+	// Three accepted sprays leave the next one hidden. A restored world must
+	// reset the sequence even when the encounter identity is unchanged.
+	renderer := Renderer{room: "ENC-PRO-01", generation: 1, effects: pool}
+	renderer.enterWorld(ctx, session.WorldView{Encounter: "ENC-PRO-01", Generation: 2})
+	pool = renderer.effects
+	restored := session.EffectEvent{Tick: 400, Entity: "player", Kind: "hit", Asset: "FX-BODY", Part: part, Stain: part}
+	if err := pool.update(ctx, 400, []session.EffectEvent{restored}, reduced); err != nil || !visibleSpray(reduced) {
+		t.Fatalf("recovery did not restart the cadence: %v", err)
+	}
+	// Clock rollback also resets the pool, even without an encounter change.
+	restored.Tick = 2
+	if err := pool.update(ctx, 2, []session.EffectEvent{restored}, reduced); err != nil || !visibleSpray(reduced) {
+		t.Fatalf("clock rollback did not restart the cadence: %v", err)
+	}
+}
+
+func TestReducedMonolithicCadenceIgnoresOtherEffects(t *testing.T) {
+	ctx := context.Background()
+	blood := session.VisualPart{Asset: "FX-BODY"}
+	feces := session.VisualPart{Asset: "FX-FEC"}
+	events := []session.EffectEvent{
+		{Tick: 10, Ordinal: 0, Entity: "a", Kind: "hit", Asset: "FX-BODY", Part: blood, Stain: blood, Position: session.Point{X: 1}},
+		{Tick: 10, Ordinal: 1, Entity: "b", Kind: "feces", Asset: "FX-FEC", Part: feces, Position: session.Point{X: 2}},
+		{Tick: 10, Ordinal: 2, Entity: "c", Kind: "hit", Asset: "FX-BODY", Part: blood, Stain: blood, Particles: []session.VisualPart{blood}, Position: session.Point{X: 3}},
+		{Tick: 10, Ordinal: 3, Entity: "d", Kind: "removal", Asset: "FX-BODY", Part: blood, Stain: blood, Position: session.Point{X: 4}},
+	}
+	var pool effectPool
+	access := settings.Accessibility{Blood: settings.ParticlesReduced}
+	if err := pool.update(ctx, 10, events, access); err != nil {
+		t.Fatal(err)
+	}
+	items, err := pool.plan(ctx, access)
+	if err != nil {
+		t.Fatal(err)
+	}
+	visible := make(map[float64]int)
+	for _, item := range items {
+		if !item.stain && item.visible {
+			visible[item.point.X]++
+		}
+	}
+	if visible[1] != 1 || visible[2] != 1 || visible[3] != 2 || visible[4] != 0 {
+		t.Fatalf("interleaved effects changed monolithic cadence: %+v", visible)
+	}
+}
+
 func TestLayerGeometryAndThreadFailures(t *testing.T) {
-	part := session.VisualPart{Asset: "AN-GRI-IDLE", Source: session.WorldRect{X: 4, Y: 5, Width: 10, Height: 12}, Size: session.Point{X: 10, Y: 12}}
+	part := session.VisualPart{Asset: "AN-GRI-IDLE", Animation: "AN-GRI-IDLE", Source: session.WorldRect{X: 4, Y: 5, Width: 10, Height: 12}, Size: session.Point{X: 10, Y: 12}}
+	entity := session.EntityView{Parts: []session.VisualPart{part}}
+	if err := validateActorHandoff(context.Background(), "AN-GRI-IDLE", &entity); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateActorHandoff(context.Background(), "AN-GRI-HURT", &entity); err == nil || !content.ErrInvalid.Has(err) {
+		t.Fatal("stale animation frame survived interruption")
+	}
 	texture := rl.Texture2D{ID: 1, Width: 32, Height: 32}
 	if err := validatePart(part, texture); err != nil {
 		t.Fatal(err)

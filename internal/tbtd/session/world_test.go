@@ -160,6 +160,102 @@ func TestWorldViewThrowReleaseFollowsSimulation(t *testing.T) {
 	}
 }
 
+func TestWorldViewDetachedLimbLifecycleAndRecovery(t *testing.T) {
+	ctx := context.Background()
+	service, store := sessionFixture(t)
+	loadFixture(t, service, store, campaign.Snapshot{})
+	const tick = 8333334 * time.Nanosecond
+	view := frame(t, service, FrameInput{Elapsed: tick, Edges: []ActionEdge{{Action: settings.RemoveLimb, Kind: Pressed}}})
+	generation := view.World.Generation
+	for i := 0; i < 45 && len(service.world.LimbView(ctx).Objects) == 0; i++ {
+		view = frame(t, service, FrameInput{Elapsed: tick})
+	}
+	limbs := service.world.LimbView(ctx)
+	if len(limbs.Objects) != 1 || !limbs.Objects[0].Carried || view.Player.Limbs[0] {
+		t.Fatalf("removal did not publish carried limb state: %+v %+v", limbs, view.Player)
+	}
+	view = frame(t, service, FrameInput{Elapsed: tick, Values: []ActionValue{{Action: settings.Aim, X: 1}}, Edges: []ActionEdge{{Action: settings.Throw, Kind: Pressed}}})
+	for i := 0; i < 20 && service.world.LimbView(ctx).Carried != ""; i++ {
+		view = frame(t, service, FrameInput{Elapsed: tick})
+	}
+	limbs = service.world.LimbView(ctx)
+	if len(limbs.Objects) != 1 || !limbs.Objects[0].Damaging {
+		t.Fatalf("throw did not release a damaging limb: %+v", limbs)
+	}
+	id := limbs.Objects[0].ID
+	check := func(state string, markerKind string) {
+		t.Helper()
+		found := false
+		for _, entity := range view.Entities {
+			if entity.ID == id && entity.Kind == "limb" && entity.Variant == "LIM-LA" && entity.State == state {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("missing limb %s: %+v", state, view.Entities)
+		}
+		for _, marker := range view.World.Markers {
+			if marker.ID == id && marker.Kind == markerKind {
+				return
+			}
+		}
+		t.Fatalf("missing %s marker: %+v", markerKind, view.World.Markers)
+	}
+	check("damaging", "projectile")
+	for i := 0; i < 300 && service.world.LimbView(ctx).Objects[0].Airborne; i++ {
+		view = frame(t, service, FrameInput{Elapsed: tick})
+	}
+	if service.world.LimbView(ctx).Objects[0].Airborne {
+		t.Fatal("limb did not settle")
+	}
+	check("settled", "limb")
+	if err := service.policy.Transition(ctx, OpenPause, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.restore(ctx, ReturnCheckpoint); err != nil {
+		t.Fatal(err)
+	}
+	viewValue, err := service.view(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	view = viewValue.Data(ctx)
+	if view.World.Generation == generation || len(service.world.LimbView(ctx).Objects) != 0 || !view.Player.Limbs[0] {
+		t.Fatalf("restoration retained old world: %+v", view.World)
+	}
+}
+
+func TestWorldViewPublishesEnemyShotWithoutInventedAsset(t *testing.T) {
+	ctx := context.Background()
+	service, store := sessionFixture(t)
+	loadFixture(t, service, store, campaign.Snapshot{})
+	if err := service.world.AddEnemy(ctx, "test-courier", simulation.RangedEnemy, simulation.Rect{X: 330, Y: 0, Width: 28, Height: 58}); err != nil {
+		t.Fatal(err)
+	}
+	var view FrameViewData
+	var shot simulation.Projectile
+	for i := 0; i < 150; i++ {
+		view = frame(t, service, FrameInput{Elapsed: 8333334 * time.Nanosecond})
+		projectiles := service.world.CombatView(ctx).Projectiles
+		if len(projectiles) > 0 {
+			shot = projectiles[0]
+			break
+		}
+	}
+	if shot.ID == "" || shot.PlayerOwned {
+		t.Fatal("enemy never released a projectile")
+	}
+	for _, entity := range view.Entities {
+		if entity.ID == shot.ID {
+			if entity.Kind != "projectile" || entity.Variant != "enemy:HOS:RNG" || entity.Asset != "" || entity.X != shot.Position.X || entity.Y != shot.Position.Y {
+				t.Fatalf("enemy projectile: %+v", entity)
+			}
+			return
+		}
+	}
+	t.Fatalf("released projectile missing from view: %+v", view.Entities)
+}
+
 func TestWorldViewCarriesReticleInput(t *testing.T) {
 	ctx := context.Background()
 	service, store := sessionFixture(t)
@@ -276,6 +372,18 @@ func TestAcceptedDamageProducesIsolatedEffectEvent(t *testing.T) {
 	data.World.Effects[0].Entity = "mutated"
 	if view.Data(ctx).World.Effects[0].Entity != "player" {
 		t.Fatal("view exposes mutable effects")
+	}
+	data = view.Data(ctx)
+	data.World.Effects[0].Particles = []VisualPart{{Asset: "FX-BODY"}}
+	copied, err := NewFrameView(ctx, data, service.committed, service.id, service.revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data.World.Effects[0].Particles[0].Asset = "changed"
+	isolated := copied.Data(ctx)
+	isolated.World.Effects[0].Particles[0].Asset = "changed again"
+	if copied.Data(ctx).World.Effects[0].Particles[0].Asset != "FX-BODY" {
+		t.Fatal("particle frames alias frame inputs or outputs")
 	}
 	hit.Attack = "second"
 	simulationServiceTick(t, service, simulation.PlayerCommand{}, []simulation.DamageHit{hit})

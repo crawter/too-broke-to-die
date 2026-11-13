@@ -82,9 +82,9 @@ func planWorld(ctx context.Context, data session.FrameViewData) (_ []drawItem, e
 				state = "DEFEAT"
 			}
 			asset = content.PresentationID("AN-EN-" + strings.TrimPrefix(string(entity.Asset), "ART-EN-") + "-" + state)
-		case "object", "rescue", "boss", "projectile":
+		case "object", "rescue", "boss", "projectile", "limb":
 			if entity.Asset == "" {
-				return nil, content.ErrInvalid.New("%s: missing %s asset binding", entity.ID, entity.Kind)
+				return nil, content.ErrInvalid.New("%s: missing %s asset binding (%s)", entity.ID, entity.Kind, entity.Variant)
 			}
 			asset = entity.Asset
 		default:

@@ -21,12 +21,13 @@ const (
 
 // effectPool holds only decorative effects, never hazards or evidence.
 type effectPool struct {
-	particles int
-	stains    []time.Duration
-	active    []activeEffect
-	seen      map[effectKey]uint64
-	lastTick  uint64
-	shake     *activeEffect
+	particles          int
+	stains             []session.EffectEvent
+	active             []activeEffect
+	seen               map[effectKey]uint64
+	lastTick           uint64
+	skipNextMonolithic bool
+	shake              *activeEffect
 }
 
 type effectKey struct {
@@ -37,32 +38,28 @@ type effectKey struct {
 }
 
 type activeEffect struct {
-	event     session.EffectEvent
-	expires   uint64
-	particles int
+	event          session.EffectEvent
+	expires        uint64
+	particles      int
+	reducedVisible bool
 }
 
-func (pool *effectPool) addParticles(count int, access settings.Accessibility) int {
+func (pool *effectPool) addParticles(count int) int {
 	if count <= 0 {
 		return 0
-	}
-	if access.Blood == settings.ParticlesReduced {
-		count /= 2
 	}
 	added := min(count, maxParticles-pool.particles)
 	pool.particles += added
 	return added
 }
 
-func (pool *effectPool) addStain(born time.Duration, access settings.Accessibility) {
-	limit := maxStains
-	if access.Blood == settings.ParticlesReduced {
-		limit /= 2
+func (pool *effectPool) addStain(event session.EffectEvent) {
+	if len(pool.stains) >= maxStains {
+		pool.stains = pool.stains[len(pool.stains)-maxStains+1:]
 	}
-	if len(pool.stains) >= limit {
-		pool.stains = pool.stains[len(pool.stains)-limit+1:]
-	}
-	pool.stains = append(pool.stains, born)
+	// The stain does not need the independently owned particle slice.
+	event.Particles = nil
+	pool.stains = append(pool.stains, event)
 }
 
 // shakeLimit returns the largest permitted world-only displacement and life.
@@ -90,7 +87,7 @@ func sprayLifetime(removal bool) time.Duration {
 // update consumes authoritative events once, using simulation ticks so pause
 // cannot advance an effect or replay a removal. Only decorative particles are
 // capped; gameplay markers and actual limbs are never placed in this pool.
-func (pool *effectPool) update(ctx context.Context, tick uint64, events []session.EffectEvent, access settings.Accessibility) (err error) {
+func (pool *effectPool) update(ctx context.Context, tick uint64, events []session.EffectEvent, _ settings.Accessibility) (err error) {
 	defer mon.Task()(&ctx)(&err)
 	if tick > math.MaxInt64-72 {
 		return content.ErrInvalid.New("effect clock overflow")
@@ -100,7 +97,7 @@ func (pool *effectPool) update(ctx context.Context, tick uint64, events []sessio
 		if event.Kind == "feces" {
 			expected = "FX-FEC"
 		}
-		if event.Tick > tick || event.Entity == "" || event.Asset != expected || !validPoint(event.Position) || event.Direction < -1 || event.Direction > 1 || (event.Kind != "hit" && event.Kind != "removal" && event.Kind != "feces") {
+		if len(event.Particles) >= maxParticles || event.Tick > tick || event.Entity == "" || event.Asset != expected || !validPoint(event.Position) || event.Direction < -1 || event.Direction > 1 || (event.Kind != "hit" && event.Kind != "removal" && event.Kind != "feces") {
 			return content.ErrInvalid.New("%s: invalid visual effect event for %s", event.Asset, event.Entity)
 		}
 	}
@@ -142,13 +139,23 @@ func (pool *effectPool) update(ctx context.Context, tick uint64, events []sessio
 			continue
 		}
 		pool.seen[key] = event.Tick + lifetime
-		count := pool.addParticles(16, access)
+		// Reserve the actual number of supplied authored regions, not a
+		// notional count unrelated to the sprites that will be drawn.
+		count := pool.addParticles(1 + len(event.Particles))
+		event.Particles = slices.Clone(event.Particles)
 		effect := activeEffect{event: event, expires: event.Tick + lifetime, particles: count}
 		if count != 0 {
+			if event.Kind != "feces" && len(event.Particles) == 0 {
+				// Choose once per admitted emission, not once per frame or
+				// from tick parity. Duplicates and expired events do not
+				// advance the cadence.
+				effect.reducedVisible = !pool.skipNextMonolithic
+				pool.skipNextMonolithic = !pool.skipNextMonolithic
+			}
 			pool.active = append(pool.active, effect)
 		}
 		if event.Kind == "hit" || event.Kind == "removal" {
-			pool.addStain(time.Duration(event.Tick), access)
+			pool.addStain(event)
 		}
 		if event.Entity == "player" && (event.Kind == "hit" || event.Kind == "removal") {
 			_, duration := shakeLimit(event.Heavy, settings.Accessibility{Shake: settings.ShakeFull})
@@ -160,6 +167,52 @@ func (pool *effectPool) update(ctx context.Context, tick uint64, events []sessio
 		}
 	}
 	return nil
+}
+
+// effectItem is a region delivered by the producer. Visibility is decided
+// separately from validation so reduced effects cannot hide a broken handoff.
+type effectItem struct {
+	part    session.VisualPart
+	point   session.Point
+	facing  int
+	stain   bool
+	visible bool
+	alpha   uint8
+}
+
+func (pool *effectPool) plan(ctx context.Context, access settings.Accessibility) (_ []effectItem, err error) {
+	defer mon.Task()(&ctx)(&err)
+	var items []effectItem
+	for i, event := range pool.stains {
+		if event.Stain.Asset == "" {
+			return nil, content.ErrInvalid.New("%s: missing authored stain frame", event.Asset)
+		}
+		visible := access.Blood != settings.ParticlesReduced || i >= len(pool.stains)-maxStains/2
+		// The oldest retained marks fade first as the room fills.
+		alpha := uint8(64 + 191*(i+1)/len(pool.stains))
+		items = append(items, effectItem{part: event.Stain, point: event.Position, facing: event.Direction, stain: true, visible: visible, alpha: alpha})
+	}
+	for _, effect := range pool.active {
+		if effect.event.Part.Asset != effect.event.Asset {
+			return nil, content.ErrInvalid.New("%s: missing effect frame handoff", effect.event.Asset)
+		}
+		bloodReduced := access.Blood == settings.ParticlesReduced && effect.event.Kind != "feces"
+		baseVisible := effect.particles > 0
+		if bloodReduced && len(effect.event.Particles) == 0 {
+			// A monolithic authored spray cannot be subdivided without an
+			// invented atlas mapping. Reduce its emission rate instead.
+			baseVisible = baseVisible && effect.reducedVisible
+		}
+		items = append(items, effectItem{part: effect.event.Part, point: effect.event.Position, facing: effect.event.Direction, visible: baseVisible, alpha: 255})
+		for i, part := range effect.event.Particles {
+			if part.Asset == "" {
+				return nil, content.ErrInvalid.New("%s: missing particle frame %d", effect.event.Asset, i)
+			}
+			visible := i+1 < effect.particles && (!bloodReduced || i%2 == 0)
+			items = append(items, effectItem{part: part, point: effect.event.Position, facing: effect.event.Direction, visible: visible, alpha: 255})
+		}
+	}
+	return items, nil
 }
 
 // shakeOffset is applied to world drawing only, never to the reticle viewport.
