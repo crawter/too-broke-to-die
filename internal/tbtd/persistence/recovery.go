@@ -62,6 +62,7 @@ func (store *Store) inspectCampaign(ctx context.Context, id session.CampaignID) 
 	if errors.Is(selectErr, session.SaveTooNew) || errors.Is(selectErr, session.ContentIncompatible) {
 		return result, selectErr
 	}
+	result.BothRevisionsInvalid = errors.Is(inspection.Slots[0].Err, session.SaveCorrupt) && errors.Is(inspection.Slots[1].Err, session.SaveCorrupt)
 	for _, slot := range inspection.Slots {
 		if slot.Err == nil {
 			candidate, candidateErr := store.candidate(ctx, slot.Revision, true)

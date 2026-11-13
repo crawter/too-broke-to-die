@@ -56,11 +56,18 @@ type Service struct {
 
 	candidates []RecoveryCandidate
 
+	bothRevisionsInvalid bool
+
+	restorationReady bool
+
 	confirmation string
 
 	confirmationTarget string
 
 	closePending bool
+
+	titleInspected   bool
+	titleUnavailable bool
 
 	blocked string
 
@@ -79,6 +86,9 @@ type Service struct {
 	events []SemanticEvent
 
 	effects []EffectEvent
+
+	captions       []timedCaption
+	captionSignals *captionSignals
 }
 
 type pendingProgress struct {
@@ -136,6 +146,15 @@ func (service *Service) HandleFrame(ctx context.Context, command FrameCommand) (
 	service.notice = ""
 	service.events = nil
 	service.effects = nil
+	if service.policy.State() == StateTitle && !service.titleInspected && service.pending == nil && len(command.Data(ctx).Selections) == 0 {
+		service.titleInspected = true
+		if err = service.startLoad(ctx, InspectActive, "", 0); err != nil {
+			return FrameView{}, err
+		}
+		if !service.pending.inFlight {
+			service.clearTitleLookup()
+		}
+	}
 	if service.pending != nil && service.pending.inFlight {
 		elapsed := command.Data(ctx).Elapsed
 		if elapsed > 0 && service.pending.elapsed < 5*time.Second {
@@ -143,6 +162,9 @@ func (service *Service) HandleFrame(ctx context.Context, command FrameCommand) (
 		}
 		if err = service.poll(ctx); err != nil {
 			return FrameView{}, err
+		}
+		if service.pending != nil && service.pending.label == string(InspectActive) && !service.pending.inFlight {
+			service.clearTitleLookup()
 		}
 	}
 	if len(command.Data(ctx).Selections) > 1 {
@@ -203,6 +225,9 @@ func (service *Service) HandleFrame(ctx context.Context, command FrameCommand) (
 			}
 		}
 	}
+	if service.policy.State() == StateActive || service.policy.State() == StateScene || service.policy.State() == StateTitle {
+		service.restorationReady = false
+	}
 	if !decision.Interrupted && beforeState == StateScene && decision.State == StateScene && len(decision.Selections) == 0 {
 		if err = service.sceneInput(ctx, command.Data(ctx), confirmHeld); err != nil {
 			service.policy.scene.Freeze()
@@ -239,6 +264,9 @@ func (service *Service) HandleFrame(ctx context.Context, command FrameCommand) (
 			}
 		}
 	}
+	if beforeState != StateTitle && service.policy.State() == StateTitle {
+		service.titleInspected = false
+	}
 	view, err := service.view(ctx)
 	if err != nil {
 		return FrameView{}, err
@@ -266,6 +294,8 @@ func (service *Service) bindBossArena(ctx context.Context) (err error) {
 	service.bossWorld, service.bossArena = service.world, arena
 	service.worldGeneration++
 	service.effects = nil
+	service.captions = nil
+	service.captionSignals = nil
 	return nil
 }
 
@@ -306,7 +336,11 @@ func (service *Service) step(ctx context.Context, input simulation.PlayerCommand
 
 func (service *Service) view(ctx context.Context) (_ FrameView, err error) {
 	defer mon.Task()(&ctx)(&err)
-	data := FrameViewData{State: service.policy.State(), Save: service.save, Error: service.failure, Candidates: slices.Clone(service.candidates), Confirmation: service.confirmation, Notice: service.notice, ExitRequested: service.exit, Events: service.events}
+	data := FrameViewData{State: service.policy.State(), Save: service.save, Error: service.failure, Candidates: slices.Clone(service.candidates), BothRevisionsInvalid: service.bothRevisionsInvalid, RestorationReady: service.restorationReady, Confirmation: service.confirmation, Notice: service.notice, ExitRequested: service.exit, Events: service.events}
+	if data.State == StateTitle {
+		data.TitleLoading = !service.titleInspected || (service.pending != nil && service.pending.label == string(InspectActive))
+		data.TitleUnavailable = service.titleUnavailable
+	}
 	switch service.confirmation {
 	case "return_checkpoint":
 		data.Warning = "Незачтённый прогресс попытки будет сброшен. Зачтённые дела и штрафы сохраняются"
@@ -335,6 +369,16 @@ func (service *Service) view(ctx context.Context) (_ FrameView, err error) {
 	}
 	if service.pending != nil {
 		data.Pending = PendingEvent{Operation: service.pending.request.Data().Operation, Label: service.pending.label}
+		for _, scene := range service.scenes {
+			for _, unit := range scene.Units {
+				if service.pending.label == scene.ID+"/"+unit.ID {
+					data.Pending.SceneName, data.Pending.UnitText = string(scene.Narrative), unit.Text
+					if data.Pending.SceneName == "" {
+						data.Pending.SceneName = string(scene.Ending)
+					}
+				}
+			}
+		}
 		data.Slow = service.pending.inFlight && service.pending.elapsed >= 5*time.Second
 	} else if service.blocked != "" {
 		data.Pending.Label = service.blocked
@@ -365,6 +409,30 @@ func (service *Service) view(ctx context.Context) (_ FrameView, err error) {
 		if err = service.worldView(ctx, &data); err != nil {
 			return FrameView{}, err
 		}
+		for _, event := range service.events {
+			if event.Kind == "saved" && event.Durable && event.Revision == service.revision {
+				service.retainCaption("CAP-UI-SAVED", data.World.Tick)
+				if !slices.ContainsFunc(data.Texts, func(text TextView) bool { return text.ID == "CAP-UI-SAVED" }) {
+					data.Texts = append(data.Texts, TextView{ID: "CAP-UI-SAVED"})
+				}
+			}
+		}
 	}
-	return NewFrameView(ctx, data, service.committed, service.id, service.revision)
+	if data.State == StateSaving {
+		data.Texts = append(data.Texts, TextView{ID: "CAP-UI-PENDING"})
+	} else if data.State == StateError {
+		data.Texts = append(data.Texts, TextView{ID: "CAP-UI-ERROR"})
+	}
+	view, err := NewFrameView(ctx, data, service.committed, service.id, service.revision)
+	if err != nil {
+		return FrameView{}, err
+	}
+	if service.id != "" && view.data.Progress.Anchor == "" {
+		plan, planErr := service.campaign.RestorePlan(ctx, service.committed)
+		if planErr != nil {
+			return FrameView{}, planErr
+		}
+		view.data.Progress.Anchor = plan.Anchor
+	}
+	return view, nil
 }

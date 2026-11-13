@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strconv"
 
+	"too-broke-to-die/internal/tbtd/campaign"
 	"too-broke-to-die/internal/tbtd/simulation"
 )
 
@@ -49,11 +50,31 @@ func (service *Service) lookupNewGame(ctx context.Context) (err error) {
 	return nil
 }
 
+func (service *Service) clearTitleLookup() {
+	service.pending = nil
+	service.save, service.failure = SaveNone, ""
+	service.titleUnavailable = true
+	service.committed, service.id, service.revision, service.digest = campaign.Snapshot{}, "", 0, ""
+}
+
 func (service *Service) loadResult(ctx context.Context, data ProgressResultData) (err error) {
 	defer mon.Task()(&ctx)(&err)
 	pending := service.pending
 	input := pending.request.Data()
+	if input.Kind == InspectActive {
+		service.clearTitleLookup()
+		if data.Status == StorageSucceeded && campaignIDPattern.MatchString(string(data.Campaign)) && data.RevisionKnown && validPayloadDigest(data.PayloadDigest) && data.Operation == (OperationID{}) && (data.Snapshot.Data(ctx).CampaignID == "" || data.Snapshot.Data(ctx).CampaignID == string(data.Campaign)) {
+			if validateErr := service.campaign.Validate(ctx, data.Snapshot); validateErr == nil {
+				if _, planErr := service.campaign.RestorePlan(ctx, data.Snapshot); planErr == nil {
+					service.committed, service.id, service.revision, service.digest = data.Snapshot, data.Campaign, data.Revision, data.PayloadDigest
+					service.titleUnavailable = false
+				}
+			}
+		}
+		return nil
+	}
 	if data.Status != StorageSucceeded {
+		service.bothRevisionsInvalid = data.BothRevisionsInvalid && data.Status == StorageCorrupt
 		service.candidates = data.Candidates
 		service.fail(ctx, resultCode(data))
 		return nil
@@ -107,6 +128,7 @@ func (service *Service) loadResult(ctx context.Context, data ProgressResultData)
 	service.pending = nil
 	service.failure, service.save = "", SaveConfirmed
 	service.candidates = nil
+	service.bothRevisionsInvalid = false
 	service.failureHandled, service.replay = false, false
 	if service.policy.State() == StateSaving {
 		if err = service.policy.Transition(ctx, SaveSuccess, StateRestoring); err != nil {
@@ -148,7 +170,11 @@ func (service *Service) finishRestore(ctx context.Context) (err error) {
 	service.failureHandled, service.replay = false, false
 	switch AppState(plan.State) {
 	case StatePause:
-		return service.policy.Transition(ctx, RestoreActive, "")
+		if err = service.policy.Transition(ctx, RestoreActive, ""); err != nil {
+			return err
+		}
+		service.restorationReady = true
+		return nil
 	case StateScene:
 		if len(service.scenes) != 0 {
 			if err = service.loadScene(ctx, plan.SceneEntry, restored.Data(ctx).SceneUnit); err != nil {

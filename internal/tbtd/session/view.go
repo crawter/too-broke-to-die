@@ -253,6 +253,9 @@ type PlayerView struct {
 
 	ChannelProgress float64
 
+	// RejectionID is the catalogue identity for the last rejected action.
+	RejectionID content.PresentationID
+
 	Action string
 
 	AttackPhase string
@@ -394,6 +397,11 @@ type PendingEvent struct {
 	Operation OperationID
 
 	Label string
+
+	// SceneName and UnitText are taken from the validated authored scene for a
+	// pending scene-unit transition, not from storage diagnostics.
+	SceneName string
+	UnitText  string
 }
 
 // SceneView identifies the current authored unit and its fixed-clock time.
@@ -415,6 +423,14 @@ type SceneView struct {
 	ReplayLabel string
 }
 
+// TicketView contains authoritative eligibility and the current attempt status.
+type TicketView struct {
+	Deed      content.DeedID
+	Status    string
+	Missing   []string
+	FailureID content.PresentationID
+}
+
 // FrameViewData contains application, recovery, world and cue data. Progress
 // passed in this structure is ignored by NewFrameView: the constructor derives
 // it from the supplied acknowledged snapshot. Slices are copied on both sides.
@@ -422,6 +438,10 @@ type FrameViewData struct {
 	State AppState
 
 	Save SaveIndicator
+
+	// TitleLoading and TitleUnavailable describe the read-only profile lookup.
+	TitleLoading     bool
+	TitleUnavailable bool
 
 	Progress ProgressView
 
@@ -448,6 +468,12 @@ type FrameViewData struct {
 
 	Candidates []RecoveryCandidate
 
+	// BothRevisionsInvalid is an explicit storage inspection outcome.
+	BothRevisionsInvalid bool
+
+	// RestorationReady remains true until the restored pause is resumed.
+	RestorationReady bool
+
 	Player PlayerView
 
 	Boss BossView
@@ -459,6 +485,19 @@ type FrameViewData struct {
 	World WorldView
 
 	Tracked content.DeedID
+
+	// ObjectiveID is the validated catalogue identity for the live next action.
+	ObjectiveID content.PresentationID
+
+	// ServiceStatus is the authoritative transient attempt state.
+	ServiceStatus string
+
+	// Emergency identifies the current live danger, including its warning interval.
+	Emergency content.EmergencyID
+
+	EmergencyWarning bool
+
+	Tickets []TicketView
 
 	Texts []TextView
 
@@ -533,6 +572,10 @@ func cloneFrameView(data FrameViewData) FrameViewData {
 	data.World.Markers = slices.Clone(data.World.Markers)
 	data.World.Landings = slices.Clone(data.World.Landings)
 	data.Texts = slices.Clone(data.Texts)
+	data.Tickets = slices.Clone(data.Tickets)
+	for i := range data.Tickets {
+		data.Tickets[i].Missing = slices.Clone(data.Tickets[i].Missing)
+	}
 	data.Menu = slices.Clone(data.Menu)
 	data.Choices = slices.Clone(data.Choices)
 	data.Candidates = slices.Clone(data.Candidates)

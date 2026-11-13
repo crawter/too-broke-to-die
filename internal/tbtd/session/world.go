@@ -19,6 +19,41 @@ func worldRect(rect simulation.Rect) WorldRect {
 	return WorldRect{X: rect.X, Y: rect.Y, Width: rect.Width, Height: rect.Height}
 }
 
+// serviceObjectiveID maps the simulation's current action to authored text. It
+// never maps a pending certification to a receipt or claims completion.
+func serviceObjectiveID(view simulation.ServiceView) content.PresentationID {
+	if view.Status == simulation.ServicePending {
+		return "TXT-SAVE-PENDING"
+	}
+	if view.Status == simulation.ServiceFailed {
+		return "TXT-LED-RESET"
+	}
+	switch view.Objective {
+	case "hold certification terminal":
+		return "TXT-EVD-READY"
+	case "show the committed receipt":
+		return "TXT-EVD-EXISTING"
+	case "push the sealed trolley to the receiving pad":
+		return "TXT-ACT-SUP-PAD"
+	case "weight the plate and latch the gate":
+		return "TXT-ACT-RES-GATE"
+	case "ask the named adult to follow", "clear the hazard and release the waiting adult":
+		return "TXT-ACT-RES-WAIT"
+	case "guide the named adult to refuge":
+		return "TXT-ACT-RES-REFUGE"
+	case "throw a limb into the marked paddle":
+		return "TXT-ACT-UTL-PADDLE"
+	case "close the bypass switch":
+		return "TXT-ACT-UTL-BYPASS"
+	case "start the evidence recorder":
+		return "TXT-ACT-PRV-RECORDER"
+	case "hit the marked camera with feces":
+		return "TXT-ACT-PRV-CAMERA"
+	default:
+		return ""
+	}
+}
+
 // enemyWarning describes only the current telegraph or strike boundary.
 func enemyWarning(enemy simulation.Enemy, tick uint64) (WorldMarker, bool) {
 	striking := enemy.AttackID != 0 && enemy.StrikeTick == tick
@@ -84,6 +119,36 @@ func nearbyLandings(x float64, platforms []content.Rect, jumps []content.BossJum
 	return result
 }
 
+// timedCaption survives frame boundaries but uses the gameplay tick so pause
+// and interruptions cannot make a brief impact disappear before it is read.
+type timedCaption struct {
+	text  TextView
+	until uint64
+}
+
+type captionSignals struct {
+	service  simulation.ServiceView
+	feed     simulation.RecruitmentView
+	boss     simulation.BossView
+	portions int
+}
+
+func (service *Service) retainCaption(id content.PresentationID, tick uint64) {
+	for i := range service.captions {
+		if service.captions[i].text.ID == id {
+			if service.captions[i].until != 0 {
+				service.captions[i].until = tick + 360
+			}
+			return
+		}
+	}
+	// Coalesce repeated cues, but do not make a waiting cue expire before it
+	// has occupied the caption band. Live danger warnings are separate.
+	if len(service.captions) < 32 {
+		service.captions = append(service.captions, timedCaption{text: TextView{ID: id}})
+	}
+}
+
 // captureEffects copies every accepted tick event before the next tick clears
 // the simulation's transient event buffers. No effect is gameplay authority.
 func (service *Service) captureEffects(ctx context.Context) {
@@ -97,6 +162,13 @@ func (service *Service) captureEffects(ctx context.Context) {
 			asset = "FX-FEC"
 		}
 		service.effects = append(service.effects, EffectEvent{Tick: state.Tick, Ordinal: ordinal, Entity: entity, Kind: kind, Asset: asset, Position: position, Direction: direction, Heavy: heavy})
+		caption := map[string]content.PresentationID{"hit": "CAP-HIT", "removal": "CAP-TEAR", "feces": "CAP-FEC-HIT"}[kind]
+		if kind == "hit" && entity == "player" {
+			caption = "CAP-HURT"
+		}
+		if caption != "" {
+			service.retainCaption(caption, state.Tick)
+		}
 		ordinal++
 	}
 	for _, outcome := range combat.Outcomes {
@@ -124,9 +196,129 @@ func (service *Service) captureEffects(ctx context.Context) {
 			box := state.Player.Bounds
 			add("removal", "player", Point{X: box.X + box.Width/2, Y: box.Y + box.Height/2}, service.world.PlayerStatus().Facing, true)
 		}
+		if id := map[string]content.PresentationID{"retrieved": "CAP-LIMB-RETRIEVE", "replaced": "CAP-REPLACE", "regenerated": "CAP-REGEN", "released": "CAP-LIMB-FLIGHT", "impact": "CAP-LIMB-IMPACT"}[event.Kind]; id != "" {
+			service.retainCaption(id, state.Tick)
+		}
 	}
-	for _, impact := range service.world.FecesView(ctx).Impacts {
+	for _, release := range combat.Releases {
+		if release.Payload == "feces" {
+			service.retainCaption("CAP-FEC-RELEASE", state.Tick)
+		}
+	}
+	feces := service.world.FecesView(ctx)
+	for _, impact := range feces.Impacts {
 		add("feces", impact.Projectile, Point{X: impact.Position.X, Y: impact.Position.Y}, 0, false)
+		if impact.Kind == "source" {
+			service.retainCaption("CAP-SOURCE-HIT", state.Tick)
+		}
+	}
+	current := captionSignals{service: service.world.ServiceView(ctx), feed: service.world.Recruitment(ctx), boss: service.world.Boss(ctx), portions: feces.Portions}
+	previous := service.captionSignals
+	if previous != nil {
+		if current.service.Deed == previous.service.Deed && current.service.Attempt == previous.service.Attempt {
+			for _, signal := range []struct {
+				before, after bool
+				id            content.PresentationID
+			}{
+				{previous.service.SealBroken, current.service.SealBroken, "CAP-SERVICE-SEAL"},
+				{previous.service.PaddleLatched, current.service.PaddleLatched, "CAP-SERVICE-PADDLE"},
+				{previous.service.BypassClosed, current.service.BypassClosed, "CAP-SERVICE-BYPASS"},
+				{previous.service.RecorderStarted, current.service.RecorderStarted, "CAP-SERVICE-RECORDER"},
+				{previous.service.CameraInterrupted, current.service.CameraInterrupted, "CAP-SERVICE-CAMERA"},
+			} {
+				if !signal.before && signal.after {
+					service.retainCaption(signal.id, state.Tick)
+				}
+			}
+		}
+		if current.feed.ID != "" && current.feed.ID == previous.feed.ID {
+			if current.feed.Live > previous.feed.Live {
+				service.retainCaption("CAP-SOURCE-SPAWN", state.Tick)
+			}
+			if current.feed.Health < previous.feed.Health {
+				service.retainCaption("CAP-SOURCE-HIT", state.Tick)
+				if current.feed.Health == 0 {
+					service.retainCaption("CAP-SOURCE-STOP", state.Tick)
+				}
+			}
+		}
+		if current.boss.Encounter != "" && current.boss.Encounter == previous.boss.Encounter && current.boss.Phase == previous.boss.Phase {
+			for _, relay := range current.boss.Relays {
+				for _, old := range previous.boss.Relays {
+					if relay.ID == old.ID && old.Health > 0 && relay.Health == 0 {
+						service.retainCaption("CAP-RELAY-BREAK", state.Tick)
+					}
+				}
+			}
+		}
+		if feces.Portions > previous.portions {
+			service.retainCaption("CAP-FEC-REFILL", state.Tick)
+		}
+	}
+	service.captionSignals = &current
+}
+
+// warningCaptions are tied to live warning states, not guessed offscreen
+// attacks. They end when the underlying telegraph ends or is interrupted.
+func (service *Service) warningCaptions(ctx context.Context, data *FrameViewData, player simulation.Rect, combat simulation.CombatView, boss simulation.BossView) {
+	defer mon.Task()(&ctx)(nil)
+	add := func(id content.PresentationID, source simulation.Rect) {
+		direction := "near"
+		center := source.X + source.Width/2
+		playerCenter := player.X + player.Width/2
+		if center < playerCenter-48 {
+			direction = "left"
+		} else if center > playerCenter+48 {
+			direction = "right"
+		} else if source.Y > player.Y+player.Height {
+			direction = "above"
+		}
+		for _, existing := range data.Texts {
+			if existing.ID == id && existing.Direction == direction {
+				return
+			}
+		}
+		data.Texts = append(data.Texts, TextView{ID: id, Direction: direction})
+	}
+	emergency := service.world.EmergencyView(ctx)
+	if emergency.ID != "" && emergency.WarningTicks > 0 {
+		add("CAP-WARN-EMERGENCY", emergency.Envelope)
+	}
+	for _, enemy := range combat.Enemies {
+		if enemy.Health > 0 && enemy.Phase == simulation.EnemyTelegraph {
+			id := content.PresentationID("CAP-WARN-ENEMY")
+			if enemy.Kind == simulation.RangedEnemy {
+				id = "CAP-WARN-RANGED"
+			}
+			add(id, enemy.Body.Bounds)
+		}
+	}
+	for _, hazard := range service.world.Hazards(ctx) {
+		if hazard.Phase == simulation.HazardWarning {
+			id := content.PresentationID("CAP-WARN-HAZARD")
+			if hazard.Lethal {
+				id = "CAP-WARN-CRUSHER"
+			}
+			add(id, hazard.Bounds)
+		}
+	}
+	stage := map[simulation.BossStage]string{simulation.BossTelegraph: "PREP", simulation.BossActive: "ACTIVE", simulation.BossRecovery: "RECOVER"}[boss.Stage]
+	if stage != "" && boss.Attack.ID != "" {
+		add(content.PresentationID("CAP-BOSS-"+boss.Attack.ID+"-"+stage), boss.Bounds)
+	}
+	if boss.Stage == simulation.BossRecovery && boss.Protected {
+		for _, relay := range boss.Relays {
+			if relay.Required && relay.Health > 0 {
+				add("CAP-RELAY-PROTECT", relay.Bounds)
+			}
+		}
+	}
+	feed := service.world.Recruitment(ctx)
+	for _, replacement := range feed.Queue {
+		if replacement.Warning {
+			add("CAP-SOURCE-QUEUE", feed.Bounds)
+			break
+		}
 	}
 }
 
@@ -143,6 +335,16 @@ func (service *Service) worldView(ctx context.Context, data *FrameViewData) (err
 	limbs := service.world.LimbView(ctx)
 	boss := service.world.Boss(ctx)
 	data.World = WorldView{Location: current.Location, Encounter: current.Encounter, Generation: service.worldGeneration, Tick: current.Tick, Fraction: service.policy.game.Fraction(), BossLocked: boss.Encounter != "" && boss.Stage != simulation.BossDormant && boss.Stage != simulation.BossDefeated, Effects: append([]EffectEvent(nil), service.effects...)}
+	service.warningCaptions(ctx, data, current.Player.Bounds, combat, boss)
+	if len(service.captions) > 0 && service.captions[0].until != 0 && current.Tick >= service.captions[0].until {
+		service.captions = service.captions[1:]
+	}
+	if len(service.captions) > 0 {
+		if service.captions[0].until == 0 {
+			service.captions[0].until = current.Tick + 360
+		}
+		data.Texts = append(data.Texts, service.captions[0].text)
+	}
 	encounter := string(current.Encounter)
 	switch {
 	case strings.HasPrefix(encounter, "ENC-PRO-"):
@@ -259,6 +461,64 @@ func (service *Service) worldView(ctx context.Context, data *FrameViewData) (err
 		civilians[civilian.ID] = civilian
 	}
 	serviceView := service.world.ServiceView(ctx)
+	interactionView := service.world.InteractionView(ctx)
+	fecesView := service.world.FecesView(ctx)
+	if data.Player.Channel == "" && interactionView.Duration > 0 && interactionView.Progress > 0 {
+		data.Player.Channel = "interact"
+		data.Player.ChannelProgress = min(1, float64(interactionView.Progress)/float64(interactionView.Duration))
+	}
+	if data.Player.Channel == "" && fecesView.Channel != "" {
+		data.Player.Channel = "refill"
+		data.Player.ChannelProgress = max(0, min(1, 1-float64(fecesView.Remaining)/180))
+	}
+	for _, reason := range []string{combat.InvalidAction, limbs.Invalid, fecesView.Invalid, interactionView.Invalid, serviceView.Invalid} {
+		id := map[string]content.PresentationID{
+			"throw_requires_arm": "TXT-REASON-ARM", "throw_empty": "TXT-HUD-EMPTY", "refill_at_marked_station": "TXT-REASON-REFILL",
+			"reattach_or_regenerate_arm": "TXT-REASON-ARM", "cannot_refill": "TXT-REASON-REFILL", "action_committed": "TXT-REASON-BUSY",
+			"requires_stationary_ground": "TXT-REASON-GROUNDED", "requires_weighted_plate": "TXT-REASON-PLATE", "area_threatened": "TXT-REASON-THREAT",
+			"push_with_movement": "TXT-REASON-PUSH", "cannot_throw_limb": "TXT-REASON-THROW-LIMB", "cannot_remove": "TXT-REASON-REMOVE",
+			"cannot_replace": "TXT-REASON-REPLACE", "no_missing_limbs": "TXT-REASON-REGEN", "latch_gate_before_following": "TXT-REASON-RES-LATCH",
+			"wait_for_hazard": "TXT-REASON-RES-WAIT", "service_evidence_incomplete": "TXT-REASON-EVIDENCE", "invalid_camera_target": "TXT-FAIL-TARGET",
+		}[reason]
+		if id != "" {
+			data.Player.RejectionID = id
+			break
+		}
+	}
+	data.Tracked = serviceView.Deed
+	data.ServiceStatus = string(serviceView.Status)
+	data.ObjectiveID = serviceObjectiveID(serviceView)
+	if data.State == StateLedger {
+		for _, deed := range service.manifest.Deeds(ctx) {
+			row := TicketView{Deed: deed.Deed.ID}
+			if deed.Family == "END" {
+				missing, missingErr := service.campaign.MissingDeed(ctx, service.committed, deed.Deed.ID)
+				if missingErr != nil {
+					return missingErr
+				}
+				row.Missing = missing
+				row.Status = string(simulation.ServiceAvailable)
+				if len(missing) > 0 {
+					row.Status = string(simulation.ServiceBlocked)
+				}
+				for _, receipt := range service.committed.Data(ctx).Receipts {
+					if receipt.Certification.Deed == deed.Deed.ID {
+						row.Status = string(simulation.ServiceCertified)
+					}
+				}
+			} else {
+				ticket, ticketErr := service.world.ServiceTicket(ctx, service.campaign, service.manifest, service.committed, deed.Deed.ID)
+				if ticketErr != nil {
+					return ticketErr
+				}
+				row.Status, row.Missing = string(ticket.Service.Status), ticket.Missing
+				if ticket.Service.Status == simulation.ServiceFailed {
+					row.FailureID = content.PresentationID(map[string]string{"SUP": "TXT-FAIL-SEAL", "RES": "TXT-FAIL-ADULT", "UTL": "TXT-FAIL-FUSE", "PRV": "TXT-FAIL-RECORD"}[deed.Family])
+				}
+			}
+			data.Tickets = append(data.Tickets, row)
+		}
+	}
 	previousEntities := make(map[content.ObjectID]simulation.Entity, len(previous.Entities))
 	for _, entity := range previous.Entities {
 		previousEntities[entity.ID] = entity
@@ -386,9 +646,11 @@ func (service *Service) worldView(ctx context.Context, data *FrameViewData) (err
 	}
 	emergency := service.world.EmergencyView(ctx)
 	if emergency.ID != "" && emergency.Stage == campaign.EmergencyActive {
+		data.Emergency = emergency.ID
 		area := emergency.Danger
 		state := "active"
 		if emergency.WarningTicks > 0 {
+			data.EmergencyWarning = true
 			area = emergency.Envelope
 			state = "warning"
 		}
