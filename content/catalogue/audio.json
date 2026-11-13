@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "music_policy": "Original acoustic ensembles and faulty public address: cheap brass, plucked strings, detuned keyboard, hand percussion and mechanical rhythm. No licensed song, sampled film line or imitation of a referenced soundtrack. The composer records the exact pitches of an original two-note rise and unresolved descending answer: cheerful for receipts, satisfied rather than heroic for the ending. Return to exploration after combat without implying certification; a boss phase accent does not restart its track.",
+  "mix": {
+    "controls": ["Master","Music","Effects","Ambience","Vocal"],
+    "defaults_percent": [80,65,90,55,80],
+    "priority": ["danger warnings","essential interface results","vocal reactions","impacts","music","ambience"],
+    "warning_music_db": -6,
+    "warning_ambience_db": -8,
+    "duck_attack_ms": 50,
+    "duck_release_ms": 300,
+    "dialogue_music_db": -6,
+    "reference_lufs": -16,
+    "peak_ceiling_dbtp": -1,
+    "policy": "Mono retains essential cues; source icons or directional captions accompany essential sound. Receipt stingers never suppress warnings. Pause and ledger suspend gameplay loops and tails; focus loss freezes vocals and music. Reduced dynamic range never raises the peak ceiling."
+  },
+  "music": [
+    {"id":"MUS-HOS-EXP","seconds":96,"binding":"LOC-HOS","direction":"Muted cornet, plucked strings, trolley-wheel percussion and detuned electric piano; exploration loop."},
+    {"id":"MUS-HOS-CBT","seconds":64,"binding":"LOC-HOS","direction":"Hospital combat arrangement; one-second crossfade."},
+    {"id":"MUS-HOS-BOS","seconds":96,"binding":"ENC-HOS-05","direction":"Hospital boss arrangement; phase percussion accent without restart."},
+    {"id":"MUS-CHU-EXP","seconds":96,"binding":"LOC-CHU","direction":"Reed organ, cash drawer, dry choir vowels and low bowed strings; exploration loop."},
+    {"id":"MUS-CHU-CBT","seconds":64,"binding":"LOC-CHU","direction":"Church combat arrangement; one-second crossfade."},
+    {"id":"MUS-CHU-BOS","seconds":96,"binding":"ENC-CHU-05","direction":"Church boss arrangement; phase percussion accent without restart."},
+    {"id":"MUS-MIN-EXP","seconds":96,"binding":"LOC-MIN","direction":"Bass clarinet, stamp percussion, rigid snare and slow brass chords; exploration loop."},
+    {"id":"MUS-MIN-CBT","seconds":64,"binding":"LOC-MIN","direction":"Ministry combat arrangement; one-second crossfade."},
+    {"id":"MUS-MIN-BOS","seconds":96,"binding":"ENC-MIN-05","direction":"Ministry boss arrangement; phase percussion accent without restart."},
+    {"id":"MUS-INS-EXP","seconds":96,"binding":"LOC-INS","direction":"Original synthetic sales fragments, clipped bass, binder slaps and brittle keyboard; no real advertisement melody."},
+    {"id":"MUS-INS-CBT","seconds":64,"binding":"LOC-INS","direction":"Institute combat arrangement; one-second crossfade."},
+    {"id":"MUS-INS-BOS","seconds":96,"binding":"ENC-INS-05","direction":"Institute boss arrangement; phase percussion accent without restart."},
+    {"id":"MUS-TITLE","seconds":64,"binding":"UI-MENU-TITLE","direction":"Quiet counter-room administrative motif loop."},
+    {"id":"MUS-PRO","seconds":48,"binding":"NAR-01","direction":"Uneasy charity ensemble with marked break at heart attack."},
+    {"id":"MUS-FUNERAL","seconds":48,"binding":"NAR-02","direction":"Badly coordinated ceremonial loop with resurrection stop."},
+    {"id":"MUS-HELL","seconds":64,"binding":"END-HELL","direction":"Sparse low strings and desk percussion; space for rejection exchange."},
+    {"id":"MUS-CEREMONY","seconds":48,"binding":"END-CEREMONY","direction":"Overconfident brass, final held chord against fire and applause; not redemption."},
+    {"id":"MUS-CREDITS","seconds":120,"binding":"END-TABLEAU","direction":"Dry reprise of four institutional colors."}
+  ],
+  "stingers": ["CREDIT","CONSEQUENCE","FAIL","CHECKPOINT","DEATH","VICTORY","PERMIT","ENDING"],
+  "ambience": [
+    {"id":"AMB-HOS","binding":"LOC-HOS","direction":"Pumps, trolley wheels, subdued waiting room and faulty ventilation."},
+    {"id":"AMB-CHU","binding":"LOC-CHU","direction":"Cable hum, candle hiss, donation mechanisms and distant announcements."},
+    {"id":"AMB-MIN","binding":"LOC-MIN","direction":"Stamps, queue movement, leaking pipes and tired staff."},
+    {"id":"AMB-INS","binding":"LOC-INS","direction":"Studio fans, sales rhythms and recruitment equipment."},
+    {"id":"AMB-HELL","binding":"END-HELL","direction":"Pages, furnace room tone and long quiet gaps."},
+    {"id":"AMB-CEREMONY","binding":"END-CEREMONY","direction":"Applause, electrical strain, fire and evacuation."}
+  ],
+  "effects": [
+    {"family":"MOVE","events":["TILE:CAP-MOVE:4","WOOD:CAP-MOVE:4","CONCRETE:CAP-MOVE:4","METAL:CAP-MOVE:4","JUMP:CAP-JUMP:1","LAND:CAP-LAND:1"]},
+    {"family":"BODY","events":["SWING:CAP-SWING:3","IMPACT:CAP-HIT:3","HURT:CAP-HURT:3","TEAR:CAP-TEAR:3","REPLACE:CAP-REPLACE:3","REGEN:CAP-REGEN:3","HEADBUTT:CAP-HEADBUTT:3","COLLAPSE:CAP-COLLAPSE:3"]},
+    {"family":"LIMB","events":["ARMFLIGHT:CAP-LIMB-FLIGHT:1","LEGFLIGHT:CAP-LIMB-FLIGHT:1","IMPACT:CAP-LIMB-IMPACT:1","BOUNCE:CAP-LIMB-BOUNCE:1","RETRIEVE:CAP-LIMB-RETRIEVE:1","PLATE:CAP-PLATE:1"]},
+    {"family":"FEC","events":["RELEASE:CAP-FEC-RELEASE:1","HIT:CAP-FEC-HIT:1","RECEPTOR:CAP-FEC-CAMERA:1","SMEAR:CAP-FEC-SMEAR:1","SLIP:CAP-FEC-SLIP:1","EMPTY:CAP-FEC-EMPTY:1","REFILL:CAP-FEC-REFILL:1","WASTE-PRESSURE:CAP-WARN-HAZARD:1","WASTE-HAZARD:CAP-WARN-HAZARD:1"]},
+    {"family":"SERVICE","events":["SEAL:CAP-SERVICE-SEAL:1","TROLLEY:CAP-SERVICE-TROLLEY:1","PLATE:CAP-PLATE:1","LATCH:CAP-SERVICE-LATCH:1","PADDLE:CAP-SERVICE-PADDLE:1","BYPASS:CAP-SERVICE-BYPASS:1","METER:CAP-SERVICE-METER:1","RECORDER:CAP-SERVICE-RECORDER:1","CAMERA:CAP-SERVICE-CAMERA:1"]},
+    {"family":"WARN","events":["ENEMY:CAP-WARN-ENEMY:1","RANGED:CAP-WARN-RANGED:1","HAZARD:CAP-WARN-HAZARD:1","CRUSHER:CAP-WARN-CRUSHER:1","EMERGENCY:CAP-WARN-EMERGENCY:1"]},
+    {"family":"SOURCE","events":["QUEUE:CAP-SOURCE-QUEUE:1","SPAWN:CAP-SOURCE-SPAWN:1","HIT:CAP-SOURCE-HIT:1","STOP:CAP-SOURCE-STOP:1","PROTECT:CAP-RELAY-PROTECT:1","BREAK:CAP-RELAY-BREAK:1"]},
+    {"family":"UI","events":["FOCUS:CAP-UI-FOCUS:1","CONFIRM:CAP-UI-CONFIRM:1","CANCEL:CAP-UI-CANCEL:1","INVALID:CAP-UI-INVALID:1","LEDGER:CAP-UI-LEDGER:1","PENDING:CAP-UI-PENDING:1","SAVED:CAP-UI-SAVED:1","ERROR:CAP-UI-ERROR:1"]},
+    {"family":"END","events":["DEATH:CAP-END-DEATH:1","HELL:CAP-END-HELL:1","APPOINTMENT:CAP-END-APPOINTMENT:1","POWER:CAP-END-POWER:1","RIBBON:CAP-END-RIBBON:1","APPLAUSE:CAP-END-APPLAUSE:1","FIRE:CAP-END-FIRE:1"]}
+  ],
+  "characters": ["GRI","VER","POT","SAV","BLA","LEV","NIN","SAT"],
+  "vocal_categories": ["EFFORT","HURT","LAUGH","REACT"],
+  "trends": ["SIXSEVEN","LEVEL","BRAND"]
+}
