@@ -20,16 +20,17 @@ var mon = monkit.Package()
 
 // World is the sole owner of its transient state. It is not concurrent-safe.
 type World struct {
-	grid     *Grid
-	state    State
-	previous State
-	motion   playerMotion
-	limbs    limbState
-	lethal   []Rect
-	combat   combatState
-	feces    fecesState
-	objects  objectState
-	service  serviceState
+	grid      *Grid
+	state     State
+	previous  State
+	motion    playerMotion
+	limbs     limbState
+	lethal    []Rect
+	combat    combatState
+	feces     fecesState
+	objects   objectState
+	service   serviceState
+	encounter encounterState
 }
 
 // TickInput supplies one actor's velocity and the one-way platform currently
@@ -180,6 +181,24 @@ func NewWorld(ctx context.Context, owner *campaign.Campaign, manifest *content.C
 			return nil, fmt.Errorf("missing bay %s", room.Encounter)
 		}
 		world.combat.protection = append(world.combat.protection, rectFromContent(selected.Safety.VestibuleProtect), rectFromContent(selected.Safety.RefugeProtect))
+		world.encounter.hazards = slices.Clone(selected.Hazards)
+		world.encounter.features = slices.Clone(selected.Template.Features)
+		world.encounter.variant = selected.Variant.Number
+		world.encounter.ticket = selected.Deed
+		world.encounter.room = room
+		for _, bay := range bays {
+			if bay.Encounter == room.Encounter {
+				world.encounter.tickets = append(world.encounter.tickets, bay.Deed)
+			}
+		}
+		slices.Sort(world.encounter.tickets)
+		for _, batch := range manifest.Batches(ctx) {
+			if batch.Emergency.ID == room.Emergency {
+				world.encounter.warningText = batch.Hazard
+				world.encounter.aftermathText = batch.Recovery
+				break
+			}
+		}
 		bounds = content.Rect{X: 0, Y: -8, Width: selected.Template.Width, Height: selected.Template.Height + 8}
 		floor = selected.Template.Floor
 		spawn = content.GeometryPoint{X: 96, Y: 0}
@@ -220,10 +239,7 @@ func NewWorld(ctx context.Context, owner *campaign.Campaign, manifest *content.C
 			if emergency.ID != room.Emergency {
 				continue
 			}
-			colliders = append(colliders, Collider{ID: "emergency-barrier-" + string(emergency.ID), Kind: Solid, Bounds: rectFromContent(room.Space.Barrier)})
-			if emergency.Stage == campaign.EmergencyActive {
-				lethal = append(lethal, room.Space.Envelope)
-			}
+			colliders = append(colliders, Collider{ID: emergencyBarrierID(emergency.ID), Kind: Solid, Bounds: rectFromContent(room.Space.Barrier)})
 			if emergency.Stage == campaign.EmergencyAftermath && room.AftermathBlocking {
 				colliders = append(colliders, Collider{ID: "aftermath-" + string(emergency.ID), Kind: Solid, Bounds: rectFromContent(room.Aftermath)})
 			}
@@ -325,6 +341,12 @@ func NewWorld(ctx context.Context, owner *campaign.Campaign, manifest *content.C
 	if err = world.installService(ctx, manifest, bays, committed); err != nil {
 		return nil, err
 	}
+	if isBay {
+		world.installEncounter()
+		if err = world.installAftermathActors(ctx); err != nil {
+			return nil, err
+		}
+	}
 	world.previous = cloneState(world.state)
 	return world, nil
 }
@@ -359,6 +381,15 @@ func validateBays(ctx context.Context, manifest *content.Campaign, bays []conten
 		seen[bay.Deed] = true
 		if bay.Template.Width != 1536 || bay.Template.Height != 560 || !validRect(rectFromContent(bay.Template.Floor), false) || bay.Template.Floor.Y+bay.Template.Floor.Height != 0 {
 			return fmt.Errorf("invalid bay floor %s", bay.Deed)
+		}
+		if len(bay.Hazards) != len(bay.Variant.Stations) {
+			return fmt.Errorf("invalid hazard count %s", bay.Deed)
+		}
+		for i, hazard := range bay.Hazards {
+			area, waiting := rectFromContent(hazard.Bounds), rectFromContent(hazard.Waiting)
+			if !validRect(area, false) || !validRect(waiting, false) || waiting.Width < 160 || area.X < 240 || overlaps(area, rectFromContent(bay.Safety.VestibuleProtect)) || overlaps(area, rectFromContent(bay.Safety.RefugeProtect)) || hazard.WarningMS <= 0 || hazard.ActiveMS <= 0 || hazard.InactiveMS <= 0 || hazard.WarningMS > 3600000 || hazard.ActiveMS > 3600000 || hazard.InactiveMS > 3600000 || hazard.OffsetMS < 0 || hazard.OffsetMS > 3600000 || hazard.Lethal != (deed.Family == "SUP" && i == 0) {
+				return fmt.Errorf("invalid hazard %s station %d", bay.Deed, i)
+			}
 		}
 		checkObjects := make(map[content.ObjectID]bool)
 		for _, placed := range bay.Objects {
