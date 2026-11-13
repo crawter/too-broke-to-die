@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "family": "Noto Sans",
+  "weights": ["Regular", "SemiBold", "Bold"],
+  "glyphs": "А–Я а–я Ё ё Latin letters digits punctuation «» № ₽ $ and every shipped Russian script and interface string",
+  "sizes_px": [24, 26, 32],
+  "intended_license": "SIL Open Font License 1.1; confirm against the delivered Noto Sans files and their accompanying license.",
+  "license_obligation": "Bundle the applicable OFL license and copyright notices; preserve notices and attribution required by the delivered files. Verify reserved font names and modification terms before distribution."
+}
