@@ -7,9 +7,11 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"slices"
 
 	"too-broke-to-die/internal/tbtd/campaign"
 	"too-broke-to-die/internal/tbtd/content"
+	"too-broke-to-die/internal/tbtd/simulation"
 )
 
 // checkpointCandidate accepts only the simulation's completed physical hold.
@@ -79,6 +81,17 @@ func (service *Service) requestService(ctx context.Context, action campaign.Atte
 		return fmt.Errorf("%w: request unavailable", InvalidAction)
 	}
 	if action == campaign.AttemptAccept {
+		if len(service.scenes) != 0 {
+			state := service.committed.Data(ctx)
+			for _, definition := range service.manifest.Deeds(ctx) {
+				if definition.Deed.ID != deed {
+					continue
+				}
+				if (definition.Location == "LOC-HOS" && !slices.Contains(state.Narratives, content.NarrativeID("NAR-04"))) || (definition.Location == "LOC-INS" && !slices.Contains(state.Narratives, content.NarrativeID("NAR-08"))) {
+					return fmt.Errorf("%w: arrival scene required", campaign.ErrBlocked)
+				}
+			}
+		}
 		if attempt, ok := service.committed.ActiveAttempt(); ok && attempt.Deed == deed {
 			return nil
 		}
@@ -106,9 +119,24 @@ func (service *Service) selectAction(ctx context.Context, selection MenuSelectio
 	if service.confirmation != "" {
 		switch selection.Action {
 		case "cancel":
+			action, target := service.confirmation, service.confirmationTarget
 			service.confirmation, service.confirmationTarget = "", ""
+			if action == "quit_to_title" && (target == "consent" || target == "scene_skip") {
+				service.confirmation = target
+				return nil
+			}
+			if action == "consent" {
+				if state == StatePause {
+					service.policy.states.pauseReturn = StateActive
+					return nil
+				}
+				return service.policy.Transition(ctx, FinishScene, "")
+			}
 			return nil
 		case "confirm":
+			if (service.confirmation == "scene_skip" || service.confirmation == "consent") && state != StateScene {
+				return nil // Resume the interrupted scene before confirming it.
+			}
 			return service.confirmAction(ctx)
 		default:
 			return fmt.Errorf("%w: confirmation required", InvalidAction)
@@ -188,11 +216,39 @@ func (service *Service) selectAction(ctx context.Context, selection MenuSelectio
 		if _, err = service.campaign.ReplayEnding(ctx, service.committed); err != nil {
 			return err
 		}
+		for _, stage := range []campaign.EndingStage{campaign.EndingDeath, campaign.EndingHell, campaign.EndingCeremony, campaign.EndingTableau} {
+			if scene, ok := service.scenes[string(stage)]; !ok || len(scene.Units) == 0 {
+				return fmt.Errorf("%w: missing replay scene %s", ContentInvalid, stage)
+			}
+		}
 		if err = service.policy.Transition(ctx, ReplayEnding, ""); err != nil {
 			return err
 		}
 		service.replay = true
+		return service.loadScene(ctx, string(campaign.EndingDeath), "")
+	case "consent":
+		if state != StateActive || !service.committed.Data(ctx).Permit || service.replay || service.world == nil || service.committed.Data(ctx).Anchor != "ANC-MIN-PERMIT" {
+			return fmt.Errorf("%w: consent unavailable", InvalidAction)
+		}
+		target := service.world.InteractionView(ctx)
+		if !target.Found || target.Target.ID != simulation.PermitReviewTarget {
+			return fmt.Errorf("%w: consent requires the permit counter", InvalidAction)
+		}
+		if err = service.policy.Transition(ctx, StartScene, ""); err != nil {
+			return err
+		}
+		service.scene = scenePlayback{}
+		service.confirmation = "consent"
 		return nil
+	case "scene_advance":
+		return service.advanceScene(ctx)
+	case "exit_replay":
+		if !service.replay {
+			return fmt.Errorf("%w: replay is not active", InvalidAction)
+		}
+		service.replay = false
+		service.scene = scenePlayback{}
+		return service.policy.Transition(ctx, EndReplay, "")
 	default:
 		return fmt.Errorf("%w: menu action %s", InvalidAction, selection.Action)
 	}
@@ -203,6 +259,12 @@ func (service *Service) confirmAction(ctx context.Context) (err error) {
 	action, target := service.confirmation, service.confirmationTarget
 	service.confirmation, service.confirmationTarget = "", ""
 	switch action {
+	case "steal_donations":
+		return service.commitStory(ctx, campaign.StoryChange{Action: campaign.StoryTheft}, StatePause, "donation theft")
+	case "scene_skip":
+		return service.finishCurrentScene(ctx)
+	case "consent":
+		return service.commitStory(ctx, campaign.StoryChange{Action: campaign.StoryConsent}, StateScene, "consent")
 	case "new_game":
 		if service.policy.State() == StateError {
 			if target != "unknown_campaign" || !service.recoveryLoadFailed() {
@@ -227,6 +289,8 @@ func (service *Service) confirmAction(ctx context.Context) (err error) {
 		return service.restore(ctx, ReturnCheckpoint)
 	case "quit_to_title":
 		service.notice = "Live position and uncertified work reset; certified services and penalties remain."
+		service.scene = scenePlayback{}
+		service.replay = false
 		return service.policy.Transition(ctx, ReturnTitle, "")
 	case "reload_saved", "exit_unsaved":
 		if service.blocked != "" {

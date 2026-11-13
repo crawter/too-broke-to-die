@@ -150,6 +150,12 @@ func (service *Service) finishRestore(ctx context.Context) (err error) {
 	case StatePause:
 		return service.policy.Transition(ctx, RestoreActive, "")
 	case StateScene:
+		if len(service.scenes) != 0 {
+			if err = service.loadScene(ctx, plan.SceneEntry, restored.Data(ctx).SceneUnit); err != nil {
+				service.fail(ctx, ContentInvalid)
+				return nil
+			}
+		}
 		return service.policy.Transition(ctx, RestoreScene, "")
 	case StateEnd:
 		return service.policy.Transition(ctx, RestoreCompleted, "")

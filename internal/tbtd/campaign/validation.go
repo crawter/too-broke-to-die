@@ -81,6 +81,12 @@ func (campaign *Campaign) validateStory(ctx context.Context, data State) (err er
 			}
 		}
 	}
+	if data.DonationTheft && len(data.Narratives) == 0 && (data.Anchor != "ANC-PRO-02" || data.Active != "") {
+		return fmt.Errorf("%w: invalid donation pursuit", ErrInvalid)
+	}
+	if err = validateSceneState(data); err != nil {
+		return err
+	}
 	if data.Permit && (len(data.Receipts) != 100 || !has(data.Narratives, content.NarrativeID("NAR-09"))) {
 		return fmt.Errorf("%w: permit prerequisites", ErrInvalid)
 	}

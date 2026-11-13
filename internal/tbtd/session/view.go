@@ -287,6 +287,25 @@ type PendingEvent struct {
 	Label string
 }
 
+// SceneView identifies the current authored unit and its fixed-clock time.
+type SceneView struct {
+	ID string
+
+	Unit string
+
+	Narrative content.NarrativeID
+
+	Ending content.EndingID
+
+	Ticks uint64
+
+	Background content.PresentationID
+
+	Replay bool
+
+	ReplayLabel string
+}
+
 // FrameViewData contains application, recovery, world and cue data. Progress
 // passed in this structure is ignored by NewFrameView: the constructor derives
 // it from the supplied acknowledged snapshot. Slices are copied on both sides.
@@ -323,6 +342,8 @@ type FrameViewData struct {
 	Player PlayerView
 
 	Boss BossView
+
+	Scene SceneView
 
 	Aim AimView
 

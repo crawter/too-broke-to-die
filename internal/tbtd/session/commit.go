@@ -25,8 +25,12 @@ func (service *Service) collect(ctx context.Context, isBay bool) (err error) {
 	bossPending := boss.Pending != nil
 	emergencyPending := emergency.Candidate != ""
 	dead := service.world.PlayerStatus().Dead
+	closure, err := service.world.ClosureInteraction(ctx, service.manifest)
+	if err != nil {
+		return err
+	}
 	owners := 0
-	for _, present := range []bool{servicePending, bossPending, emergencyPending} {
+	for _, present := range []bool{servicePending, bossPending, emergencyPending, closure != nil} {
 		if present {
 			owners++
 		}
@@ -37,7 +41,13 @@ func (service *Service) collect(ctx context.Context, isBay bool) (err error) {
 		service.blocked = fmt.Sprintf("unsubmitted: service=%s boss=%t emergency=%s waste=%t death=%t", view.Deed, bossPending, emergency.Candidate, waste != nil, dead)
 		return fmt.Errorf("%w: simultaneous simulation candidates require atomic owner acknowledgment", Internal)
 	}
-	if !servicePending && !bossPending && !emergencyPending && waste == nil && !dead {
+	if !servicePending && !bossPending && !emergencyPending && closure == nil && waste == nil && !dead {
+		if err = service.narrativeCandidate(ctx); err != nil || service.policy.State() != StateActive {
+			return err
+		}
+		if err = service.permitCandidate(ctx); err != nil || service.policy.State() != StateActive {
+			return err
+		}
 		if err = service.checkpointCandidate(ctx); err != nil || service.policy.State() != StateActive {
 			return err
 		}
@@ -54,6 +64,16 @@ func (service *Service) collect(ctx context.Context, isBay bool) (err error) {
 	owner, label := "death", "temporary death"
 	var proposal campaign.Snapshot
 	switch {
+	case closure != nil:
+		narrative := closureNarrative(closure.Deed)
+		definition, ok := service.scenes[string(narrative)]
+		if !ok || len(definition.Units) == 0 {
+			return fmt.Errorf("%w: missing closure scene %s", ContentInvalid, narrative)
+		}
+		closure.SceneUnit = definition.Units[0].ID
+		transition.Closure = closure
+		owner, label = "closure", string(closure.Deed)
+		proposal, err = service.campaign.Prepare(ctx, service.committed, transition)
 	case servicePending:
 		owner, label = "service", string(view.Deed)
 		if view.Status == simulation.ServiceFailed {
@@ -79,6 +99,8 @@ func (service *Service) collect(ctx context.Context, isBay bool) (err error) {
 	destination := StateActive
 	if dead {
 		destination = StateDead
+	} else if closure != nil {
+		destination = StateScene
 	}
 	return service.beginCommit(ctx, proposal, OperationID{Event: event, Sequence: transition.Sequence}, owner, label, destination)
 }
@@ -298,6 +320,11 @@ func (service *Service) acknowledge(ctx context.Context, data ProgressResultData
 	}
 	if err = service.policy.Transition(ctx, SaveSuccess, pending.destination); err != nil {
 		return err
+	}
+	if (pending.owner == "story" || pending.owner == "closure") && len(service.scenes) != 0 {
+		if err = service.restoreStoryView(ctx); err != nil {
+			return err
+		}
 	}
 	if pending.choice != "" && pending.choice != RetrySave {
 		service.notice = "Already saved: " + pending.label

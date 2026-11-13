@@ -33,6 +33,9 @@ type RestorationPlan struct {
 
 	SceneEntry string
 
+	// Pursuit restarts the uncompleted scripted escape at its entrance.
+	Pursuit bool
+
 	Ending EndingStage
 
 	Routes []content.GateID
@@ -160,9 +163,16 @@ func (campaign *Campaign) RestorePlan(ctx context.Context, snapshot Snapshot) (_
 		}
 	}
 	if !data.Consent && plan.Anchor == "ANC-PRO-02" {
-		plan.State, plan.SceneEntry = "ST-SCN", "NAR-02"
+		if data.DonationTheft && len(data.Narratives) == 0 && data.SceneEntry == "" {
+			plan.Pursuit = true
+		} else {
+			plan.State, plan.SceneEntry = "ST-SCN", "NAR-02"
+		}
 	}
-	if !data.Consent && plan.Anchor == "ANC-PRO-03" && !has(data.Narratives, content.NarrativeID("NAR-03")) {
+	if data.SceneEntry != "" {
+		plan.State, plan.SceneEntry = "ST-SCN", string(data.SceneEntry)
+	}
+	if data.SceneEntry == "" && !data.Consent && plan.Anchor == "ANC-PRO-03" && !has(data.Narratives, content.NarrativeID("NAR-03")) {
 		plan.State, plan.SceneEntry = "ST-SCN", "NAR-03"
 	}
 	switch {

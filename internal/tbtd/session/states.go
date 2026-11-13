@@ -74,6 +74,9 @@ const (
 	// ReplayEnding opens the read-only ending sequence.
 	ReplayEnding StateEvent = "replay_ending"
 
+	// EndReplay returns a read-only ending replay to the completed menu.
+	EndReplay StateEvent = "end_replay"
+
 	// ReturnTitle returns to the title menu without starting a save.
 	ReturnTitle StateEvent = "return_title"
 )
@@ -179,6 +182,9 @@ func (policy *StatePolicy) Transition(ctx context.Context, event StateEvent, des
 	case ReplayEnding:
 		valid = state == StateEnd
 		next.state = StateScene
+	case EndReplay:
+		valid = state == StateScene || (state == StatePause && policy.pauseReturn == StateScene)
+		next.state = StateEnd
 	case ReturnTitle:
 		valid = state == StatePause || state == StateDead || state == StateEnd
 		next.state = StateTitle
