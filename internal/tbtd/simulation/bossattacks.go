@@ -291,6 +291,10 @@ func validateBossPresentation(ctx context.Context, presentation BossPresentation
 		actor, name = "CHR-POT", "Ренат Потрошин"
 	case "ENC-CHU-05":
 		actor, name = "CHR-SAV", "Отец Савва"
+	case "ENC-MIN-05":
+		actor, name = "CHR-BLA", "Аркадий Благоев"
+	case "ENC-INS-05":
+		actor, name = "CHR-LEV", "Лев Виральский"
 	default:
 		return fmt.Errorf("unsupported boss presentation %s", definition.Encounter)
 	}
@@ -381,44 +385,64 @@ type ArenaProjectile struct {
 	ID       string
 	Position Vector
 	Velocity Vector
+	// Remaining bounds a committed projectile's flight, including a missed target.
+	Remaining int
 }
 
 // BossArenaView exposes encounter-specific markers without making them a
 // durable campaign result. Aftermath flags require the shared save acknowledgment.
 type BossArenaView struct {
-	Boss            BossView
-	Presentation    *BossPresentation
-	Danger          []Rect
-	Projectiles     []ArenaProjectile
-	Conveyors       []Rect
-	Screen          string
-	OrganShortage   bool
-	SpecimenBurst   bool
-	Survived        bool
-	DriveStopped    bool
-	WardBypass      bool
-	ArchiveOpen     bool
-	KioskAccessible bool
+	Boss                 BossView
+	Presentation         *BossPresentation
+	Danger               []Rect
+	Projectiles          []ArenaProjectile
+	Conveyors            []Rect
+	Screen               string
+	OrganShortage        bool
+	SpecimenBurst        bool
+	Survived             bool
+	DriveStopped         bool
+	WardBypass           bool
+	ArchiveOpen          bool
+	KioskAccessible      bool
+	WasteHeight          int
+	WasteDamage          int
+	LiftJammed           bool
+	SanitationExercise   bool
+	BroadcastStopped     bool
+	SummonsHarmless      bool
+	FinalPanelAccessible bool
+	ProtectedRelays      []string
+	Followers            int
+	FollowerQueue        []RecruitmentReplacement
+	FollowerSpawn        Rect
+	Warning              string
 }
 
 // BossArena executes the local physical attacks around the shared boss state
 // machine. A newly restored World needs a newly constructed BossArena.
 type BossArena struct {
-	world        *World
-	projectiles  []ArenaProjectile
-	presentation *BossPresentation
+	world            *World
+	projectiles      []ArenaProjectile
+	presentation     *BossPresentation
+	followerQueue    []RecruitmentReplacement
+	followerSeen     map[string]bool
+	followerNext     uint64
+	followersStarted bool
 }
 
-// NewBossArena binds the hospital or church executor to a restored boss world.
+// NewBossArena binds an encounter executor to a restored boss world.
 func NewBossArena(ctx context.Context, world *World) (_ *BossArena, err error) {
 	defer mon.Task()(&ctx)(&err)
-	if world == nil || world.grid == nil || (world.boss.definition.Encounter != "ENC-HOS-05" && world.boss.definition.Encounter != "ENC-CHU-05") {
-		return nil, fmt.Errorf("hospital or church boss world required")
+	if world == nil || world.grid == nil || !slices.Contains([]content.EncounterID{"ENC-HOS-05", "ENC-CHU-05", "ENC-MIN-05", "ENC-INS-05"}, world.boss.definition.Encounter) {
+		return nil, fmt.Errorf("boss world required")
 	}
 	if world.boss.stage != BossDormant && world.boss.stage != BossDefeated {
 		return nil, fmt.Errorf("boss arena must be bound at restoration")
 	}
-	return &BossArena{world: world}, nil
+	arena := &BossArena{world: world}
+	arena.moveInstituteCage()
+	return arena, nil
 }
 
 // View returns detached warning shapes, projectiles and acknowledged aftermath.
@@ -454,12 +478,42 @@ func (arena *BossArena) View(ctx context.Context) BossArenaView {
 			view.Screen = "paid_scandal_advertisements"
 		}
 	}
+	if world.boss.definition.Encounter == "ENC-MIN-05" {
+		if world.boss.stage == BossTelegraph || world.boss.stage == BossActive {
+			view.Warning = map[string]string{
+				"MIN-A": "Благополучие растёт — выброс отходов",
+				"MIN-B": "Санитарный прорыв — опасная струя",
+				"MIN-C": "Отчёт заверен — удар штампа",
+			}[world.boss.attack().ID]
+		}
+		view.WasteHeight = world.boss.definition.Phases[world.boss.phase].WasteHeight
+		view.WasteDamage = 15
+		if world.boss.stage == BossPending || world.boss.stage == BossDefeated {
+			view.WasteHeight, view.WasteDamage = 0, 0
+		}
+	}
+	if world.boss.definition.Encounter == "ENC-INS-05" {
+		for _, relay := range world.boss.relays {
+			if relay.Required && relay.Health > 0 {
+				view.ProtectedRelays = append(view.ProtectedRelays, "Реле "+map[string]string{"A": "А", "B": "Б"}[relay.ID])
+			}
+		}
+		view.Followers = arena.liveFollowers()
+		view.FollowerQueue = slices.Clone(arena.followerQueue)
+		view.FollowerSpawn = Rect{X: 1040 - PlayerWidth/2, Y: 0, Width: PlayerWidth, Height: PlayerHeight}
+		view.SummonsHarmless = world.boss.stage == BossPending || world.boss.stage == BossDefeated
+	}
 	if world.boss.stage == BossDefeated {
 		view.Survived = true
-		if world.boss.definition.Encounter == "ENC-HOS-05" {
+		switch world.boss.definition.Encounter {
+		case "ENC-HOS-05":
 			view.DriveStopped, view.WardBypass = true, true
-		} else {
+		case "ENC-CHU-05":
 			view.ArchiveOpen, view.KioskAccessible = true, true
+		case "ENC-MIN-05":
+			view.LiftJammed, view.SanitationExercise = true, true
+		case "ENC-INS-05":
+			view.BroadcastStopped, view.FinalPanelAccessible = true, true
 		}
 	}
 	return view
@@ -478,10 +532,17 @@ func (arena *BossArena) Step(ctx context.Context, command ObjectCommand) (err er
 	before.combat, before.limbs, before.feces = cloneCombat(world.combat), cloneLimbs(world.limbs), cloneFeces(world.feces)
 	before.objects, before.boss = cloneObjects(world.objects), cloneBoss(world.boss)
 	shots := slices.Clone(arena.projectiles)
+	queue := slices.Clone(arena.followerQueue)
+	seen := make(map[string]bool, len(arena.followerSeen))
+	for id, value := range arena.followerSeen {
+		seen[id] = value
+	}
+	next, started := arena.followerNext, arena.followersStarted
 	defer func() {
 		if err != nil {
 			*world = before
-			arena.projectiles = shots
+			arena.projectiles, arena.followerQueue, arena.followerSeen = shots, queue, seen
+			arena.followerNext, arena.followersStarted = next, started
 		}
 	}()
 	if world.boss.stage == BossPending {
@@ -491,6 +552,7 @@ func (arena *BossArena) Step(ctx context.Context, command ObjectCommand) (err er
 		return err
 	}
 	arena.moveHospitalRig()
+	arena.moveInstituteCage()
 	if world.boss.stage == BossActive {
 		switch world.boss.attack().ID {
 		case "HOS-B":
@@ -503,6 +565,18 @@ func (arena *BossArena) Step(ctx context.Context, command ObjectCommand) (err er
 			err = world.extendBossActive(ctx, 48)
 		case "CHU-C":
 			err = world.extendBossActive(ctx, 436)
+		case "MIN-A":
+			err = world.extendBossActive(ctx, 270)
+		case "MIN-B", "INS-B":
+			err = world.extendBossActive(ctx, 72)
+		case "MIN-C":
+			// The marked half may be chosen at either arena edge. Allow an
+			// intact runner to reach the opposite half after target lock.
+			err = world.extendBossActive(ctx, 270)
+		case "INS-A":
+			err = world.extendBossActive(ctx, 48)
+		case "INS-C":
+			err = world.extendBossActive(ctx, 120)
 		}
 		if err != nil {
 			return err
@@ -530,13 +604,28 @@ func (arena *BossArena) Step(ctx context.Context, command ObjectCommand) (err er
 		}
 		command.Feces.Limb.Combat.Hits = append(slices.Clone(command.Feces.Limb.Combat.Hits), hits...)
 	}
+	if world.boss.definition.Encounter == "ENC-MIN-05" && trial.boss.stage != BossPending && trial.boss.stage != BossDefeated {
+		if hit, ok := arena.sumpHit(before.state.Player.Bounds, trial.state.Player.Bounds); ok {
+			command.Feces.Limb.Combat.Hits = append(slices.Clone(command.Feces.Limb.Combat.Hits), hit)
+		}
+	}
+	if world.boss.definition.Encounter == "ENC-INS-05" && trial.boss.stage == BossPending {
+		arena.stopFollowers()
+	}
+	queued := len(arena.followerQueue)
 	if err = world.StepBoss(ctx, command); err != nil {
 		return err
 	}
+	arena.moveInstituteCage()
 	// A warning must already be visible on the first telegraph frame, not
 	// only after its first timer tick. Later samples still lock at its end.
 	if world.boss.stage == BossTelegraph && world.boss.elapsed == 0 {
 		if err = world.prepareBossMarkers(ctx, localBossMarkers(world.boss.attack(), world.state.Player.Bounds)); err != nil {
+			return err
+		}
+	}
+	if world.boss.definition.Encounter == "ENC-INS-05" {
+		if err = arena.advanceFollowers(ctx, queued, before.boss.phase); err != nil {
 			return err
 		}
 	}
@@ -564,11 +653,21 @@ func localBossMarkers(attack content.BossAttack, player Rect) []Vector {
 		return []Vector{{X: math.Max(162, math.Min(1118, x))}}
 	case "CHU-C":
 		return []Vector{{X: x, Y: 20}, {X: x, Y: 100}, {X: x, Y: 180}}
+	case "MIN-A", "MIN-B", "MIN-C":
+		return ministryMarkers(attack, player)
+	case "INS-A", "INS-B", "INS-C":
+		return instituteMarkers(attack, player)
 	}
 	return nil
 }
 
 func bossWarningAreas(attack content.BossAttack, markers []Vector) []Rect {
+	if strings.HasPrefix(attack.ID, "MIN-") {
+		return ministryWarnings(attack, markers)
+	}
+	if strings.HasPrefix(attack.ID, "INS-") {
+		return instituteWarnings(attack, markers)
+	}
 	var areas []Rect
 	for _, marker := range markers {
 		switch attack.ID {
@@ -597,6 +696,9 @@ func (arena *BossArena) localHits(ctx context.Context, from, to Rect) (_ []Damag
 	if attack.ID == "CHU-C" {
 		return arena.confessionHits(ctx, from, to)
 	}
+	if attack.ID == "MIN-A" || attack.ID == "INS-C" {
+		return arena.trajectoryHits(ctx, from, to)
+	}
 	var areas []Rect
 	relativeTo := to
 	if attack.ID == "HOS-B" {
@@ -606,7 +708,7 @@ func (arena *BossArena) localHits(ctx context.Context, from, to Rect) (_ []Damag
 		// position at one end of the tick.
 		relativeTo = moved(to, Vector{X: area.X - next.X})
 		areas = []Rect{area}
-	} else if ((attack.ID == "HOS-C" || attack.ID == "CHU-B") && boss.elapsed == boss.duration()-1) || (attack.ID != "HOS-C" && attack.ID != "CHU-B" && boss.elapsed == 0) {
+	} else if ((attack.ID == "HOS-C" || attack.ID == "CHU-B" || strings.HasPrefix(attack.ID, "MIN-") || strings.HasPrefix(attack.ID, "INS-")) && boss.elapsed == boss.duration()-1) || ((attack.ID == "HOS-A" || attack.ID == "CHU-A") && boss.elapsed == 0) {
 		areas = bossWarningAreas(attack, boss.locked)
 	}
 	if world.protected(from) || world.protected(to) {
