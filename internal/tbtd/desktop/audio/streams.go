@@ -23,9 +23,10 @@ type streamState struct {
 
 type streamPlayback struct {
 	*streamState
-	gain   float64
-	target float64
-	paused bool
+	gain    float64
+	target  float64
+	paused  bool
+	tailing bool
 }
 
 type streamTransition struct {
@@ -97,6 +98,14 @@ func (mixer *Mixer) openSelectedStream(ctx context.Context, id string) (err erro
 	if mixer.streams == nil {
 		mixer.streams = make(map[string]*streamPlayback)
 	}
+	if playback := mixer.streams[id]; playback != nil {
+		result := mixer.native.streamResult(item.stream)
+		if playback.tailing || result == "tail" || result == "tail-done" || result == "stop" || result == "ended" {
+			mixer.native.stopStream(item.stream)
+			delete(mixer.streams, id)
+			state.position = 0
+		}
+	}
 	for existing, playback := range mixer.streams {
 		if mixer.assets[existing].record.Kind == item.record.Kind {
 			if existing == id {
@@ -104,18 +113,37 @@ func (mixer *Mixer) openSelectedStream(ctx context.Context, id string) (err erro
 			} else {
 				playback.target = 0
 				playback.transition = nil
+				result := mixer.native.streamResult(mixer.assets[existing].stream)
+				if result == "tail" || result == "tail-done" {
+					playback.tailing = true
+				} else if err = mixer.native.streamTransition(mixer.assets[existing].stream, nil, nil); err != nil {
+					return fmt.Errorf("%w: %w", session.AudioUnavailable, err)
+				}
 			}
 		}
 	}
-	if mixer.streams[id] != nil {
+	if playback := mixer.streams[id]; playback != nil {
+		if err = mixer.native.streamTransition(item.stream, state.transition, mixer.transitionTail(state.transition)); err != nil {
+			return fmt.Errorf("%w: %w", session.ContentInvalid, err)
+		}
+		if playback.paused {
+			mixer.native.resumeStream(item.stream)
+			playback.paused = false
+		}
 		return nil
 	}
-	mixer.streams[id] = &streamPlayback{streamState: state, target: 1}
-	mixer.native.streamVolume(item.stream, 0)
-	mixer.native.playStream(item.stream)
-	if state.position > 0 {
-		mixer.native.seekStream(item.stream, float32(state.position))
+	if err = mixer.native.streamTransition(item.stream, state.transition, mixer.transitionTail(state.transition)); err != nil {
+		return fmt.Errorf("%w: %w", session.ContentInvalid, err)
 	}
+	mixer.native.streamVolume(item.stream, 0)
+	mixer.native.seekStream(item.stream, float32(state.position))
+	if err = mixer.native.playStream(item.stream); err != nil {
+		if !mixer.native.ready() {
+			return fmt.Errorf("%w: %w", session.AudioUnavailable, err)
+		}
+		return contentFailure(id, err)
+	}
+	mixer.streams[id] = &streamPlayback{streamState: state, target: 1}
 	return nil
 }
 
@@ -164,8 +192,25 @@ func (mixer *Mixer) scheduleTransition(ctx context.Context, event session.Semant
 			}
 		}
 	}
-	state.transition = &streamTransition{marker: *marker, action: action, tail: tail}
+	transition := &streamTransition{marker: *marker, action: action, tail: tail}
+	if playback := mixer.streams[id]; playback != nil {
+		if err = mixer.native.streamTransition(mixer.assets[id].stream, transition, mixer.transitionTail(transition)); err != nil {
+			return fmt.Errorf("%w: %s: %w", session.ContentInvalid, id, err)
+		}
+	}
+	state.transition = transition
 	return nil
+}
+
+func (mixer *Mixer) transitionTail(transition *streamTransition) *sound {
+	if transition == nil || transition.tail == "" {
+		return nil
+	}
+	item := mixer.assets[transition.tail]
+	if item == nil || len(item.sounds) == 0 {
+		return nil
+	}
+	return item.sounds[0]
 }
 
 // rememberSilentStream updates a deferred selection without native playback.
@@ -233,43 +278,69 @@ func (mixer *Mixer) advanceSilentStreams(frame Frame, paused bool) {
 			continue
 		}
 		audio := record.Audio
-		next := state.position + frame.Elapsed.Seconds()
-		if transition := state.transition; transition != nil && next*float64(audio.SampleRate) >= float64(transition.marker) {
-			state.position = float64(transition.marker) / float64(audio.SampleRate)
-			state.transition = nil
-			if transition.action == "hold" {
-				state.held = true
-			} else {
-				delete(mixer.desired, kind)
-				delete(mixer.streamState, id)
-			}
-			continue
+		elapsed := frame.Elapsed.Seconds()
+		next := state.position + elapsed
+		var loopStart, loopEnd float64
+		looping := audio.LoopStartSample != nil && audio.LoopEndSample != nil && audio.SampleRate > 0
+		if looping {
+			loopStart = float64(*audio.LoopStartSample) / float64(audio.SampleRate)
+			loopEnd = float64(*audio.LoopEndSample) / float64(audio.SampleRate)
+			looping = loopEnd > loopStart
 		}
-		if audio.LoopStartSample != nil && audio.LoopEndSample != nil && audio.SampleRate > 0 {
-			start := float64(*audio.LoopStartSample) / float64(audio.SampleRate)
-			end := float64(*audio.LoopEndSample) / float64(audio.SampleRate)
-			if end > start && next >= end {
-				next = start + math.Mod(next-end, end-start)
+		if transition := state.transition; transition != nil && audio.SampleRate > 0 {
+			marker := float64(transition.marker) / float64(audio.SampleRate)
+			distance := marker - state.position
+			reachable := true
+			if looping && marker > loopEnd {
+				// The loop end is reached before a marker in the outro.
+				reachable = false
+			} else if distance < 0 && looping && marker >= loopStart {
+				// A marker already passed in this iteration occurs on the next.
+				distance = loopEnd - state.position + marker - loopStart
+			} else if distance < 0 {
+				// One-shot markers cannot be revisited after they have passed.
+				distance = 0
 			}
+			if reachable && elapsed >= distance {
+				state.position = marker
+				state.transition = nil
+				if transition.action == "hold" {
+					state.held = true
+				} else {
+					delete(mixer.desired, kind)
+					delete(mixer.streamState, id)
+				}
+				continue
+			}
+		}
+		if looping && next >= loopEnd {
+			next = loopStart + math.Mod(next-loopEnd, loopEnd-loopStart)
 		}
 		state.position = next
 	}
 }
 
-func (mixer *Mixer) playTail(id string, frame Frame) error {
-	index := mixer.voiceSlot(3)
-	if index < 0 {
-		return nil
+// captureStreamResults records callback completions before device teardown so
+// recovery cannot replay a tail or revive a stopped selection.
+func (mixer *Mixer) captureStreamResults() {
+	for id, playback := range mixer.streams {
+		item := mixer.assets[id]
+		position := float64(mixer.native.streamTime(item.stream))
+		if !math.IsNaN(position) && !math.IsInf(position, 0) && position >= 0 {
+			playback.position = position
+		}
+		switch mixer.native.streamResult(item.stream) {
+		case "hold":
+			playback.transition = nil
+			playback.held = true
+		case "tail", "tail-done", "stop", "ended":
+			playback.transition = nil
+			if mixer.desired[item.record.Kind] == id {
+				delete(mixer.desired, item.record.Kind)
+				delete(mixer.streamState, id)
+			}
+		}
 	}
-	mixer.releaseVoice(index)
-	alias, err := mixer.native.alias(mixer.assets[id].sounds[0])
-	if err != nil {
-		return fmt.Errorf("%w: %w", session.AudioUnavailable, err)
-	}
-	mixer.voices[index] = voice{sound: alias, priority: 3, music: true}
-	volume := float32(peakCeiling * float64(frame.Settings.Master) * float64(frame.Settings.Music) / 10000 * mixer.musicDuck)
-	mixer.native.playSound(alias, volume, 0.5)
-	return nil
 }
 
 func (mixer *Mixer) advanceStreams(frame Frame, paused bool) error {
@@ -289,46 +360,31 @@ func (mixer *Mixer) advanceStreams(frame Frame, paused bool) error {
 		if !mixer.native.updateStream(item.stream) {
 			return fmt.Errorf("%w: %s: stream update", session.AudioUnavailable, id)
 		}
-		audio := item.record.Audio
 		position := float64(mixer.native.streamTime(item.stream))
 		if math.IsNaN(position) || math.IsInf(position, 0) || position < 0 {
 			return fmt.Errorf("%w: %s: invalid stream position", session.AudioUnavailable, id)
 		}
 		playback.position = position
-		if transition := playback.transition; transition != nil && position*float64(audio.SampleRate) >= float64(transition.marker) {
+		result := mixer.native.streamResult(item.stream)
+		if result == "hold" {
 			playback.transition = nil
-			if transition.action == "hold" {
-				playback.position = float64(transition.marker) / float64(audio.SampleRate)
-				playback.held = true
-				mixer.native.pauseStream(item.stream)
-				playback.paused = true
-				continue
-			}
-			if transition.action == "tail" {
-				if err := mixer.playTail(transition.tail, frame); err != nil {
-					return err
-				}
-			}
-			mixer.native.stopStream(item.stream)
-			delete(mixer.streams, id)
+			playback.held = true
+			mixer.native.pauseStream(item.stream)
+			playback.paused = true
+			continue
+		}
+		if result == "tail" || result == "tail-done" || result == "stop" || result == "ended" {
+			playback.transition = nil
 			if mixer.desired[item.record.Kind] == id {
 				delete(mixer.desired, item.record.Kind)
 				delete(mixer.streamState, id)
 			}
-			continue
-		}
-		if audio.LoopStartSample != nil && audio.LoopEndSample != nil && audio.SampleRate > 0 {
-			start := float64(*audio.LoopStartSample) / float64(audio.SampleRate)
-			end := float64(*audio.LoopEndSample) / float64(audio.SampleRate)
-			if end <= start {
-				return fmt.Errorf("%w: %s: invalid loop bounds", session.ContentInvalid, id)
+			if result != "tail" {
+				mixer.native.stopStream(item.stream)
+				delete(mixer.streams, id)
+				continue
 			}
-			if position >= end {
-				// Preserve overshoot (including multiple loop lengths) rather than
-				// losing it each time the displayed frame crosses the boundary.
-				playback.position = start + math.Mod(position-end, end-start)
-				mixer.native.seekStream(item.stream, float32(playback.position))
-			}
+			playback.tailing = true
 		}
 		playback.gain = ramp(playback.gain, playback.target, frame.Elapsed, time.Second)
 		if playback.target == 0 && math.Abs(playback.gain) < 0.000001 {

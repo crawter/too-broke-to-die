@@ -76,7 +76,7 @@ func New(ctx context.Context, filesystem fs.FS, manifest *content.Manifest, thre
 	if err = content.ValidateManifest(ctx, filesystem, manifest, false); err != nil {
 		return nil, fmt.Errorf("%w: %w", session.ContentInvalid, err)
 	}
-	return newMixer(ctx, filesystem, manifest.Records, thread, group, raylibDevice{})
+	return newMixer(ctx, filesystem, manifest.Records, thread, group, &raylibDevice{})
 }
 
 func newMixer(ctx context.Context, filesystem fs.FS, records []content.ManifestRecord, thread assets.ThreadID, group string, native device) (_ *Mixer, err error) {
@@ -185,6 +185,7 @@ func (mixer *Mixer) Update(ctx context.Context, view session.FrameView, frame Fr
 		return session.AudioUnavailable
 	}
 	if !mixer.silent && (!mixer.opened || !mixer.native.ready()) {
+		mixer.captureStreamResults()
 		mixer.failed = true
 		return session.AudioUnavailable
 	}
@@ -233,6 +234,7 @@ func (mixer *Mixer) Update(ctx context.Context, view session.FrameView, frame Fr
 			}
 		}
 		if err = mixer.advanceStreams(frame, paused); err != nil {
+			mixer.captureStreamResults()
 			mixer.failed = true
 			return err
 		}
