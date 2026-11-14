@@ -22,7 +22,11 @@ import (
 	"too-broke-to-die/internal/tbtd/session"
 )
 
-const maxAudioBytes = 64 << 20
+const (
+	maxAudioBytes      = 64 << 20
+	streamBufferFrames = 32768
+	decodeChunkFrames  = 4096
+)
 
 // The native device is the external boundary. All calls, including cleanup,
 // are made synchronously on the mixer owner's locked thread.
@@ -48,7 +52,7 @@ type device interface {
 	stopStream(*stream)
 	pauseStream(*stream)
 	resumeStream(*stream)
-	updateStream(*stream) bool
+	updateStream(*stream) error
 	streamVolume(*stream, float32)
 	streamTime(*stream) float32
 	seekStream(*stream, float32)
@@ -62,11 +66,16 @@ type sound struct {
 }
 
 // stream data and transport are protected by the device's stream mutex.
-// PCM is decoded only while selected and is released on stop.
+// The decoder and fixed-size PCM queue exist only while selected.
 type stream struct {
 	data       []byte
 	frames     int64
-	pcm        []float32
+	decoder    streamDecoder
+	queue      []float32
+	readIndex  int
+	queued     int
+	decodePos  int64
+	underrun   bool
 	position   int64
 	loopStart  int64
 	loopEnd    int64
@@ -78,6 +87,14 @@ type stream struct {
 	tail       []float32
 	tailFrame  int64
 	result     string
+}
+
+// streamDecoder is the external compressed-audio boundary. Calls run on the
+// owner thread; the audio callback only consumes the decoded queue.
+type streamDecoder interface {
+	read([]float32) (int, error)
+	seek(int64) error
+	close()
 }
 
 type raylibDevice struct {
@@ -254,39 +271,99 @@ func (native *raylibDevice) unloadStream(item *stream) {
 			break
 		}
 	}
-	item.pcm, item.data, item.tail = nil, nil, nil
+	closeStreamDecoder(item)
+	item.data, item.tail = nil, nil
 	native.mu.Unlock()
 }
 
-func (native *raylibDevice) playStream(item *stream) error {
-	wave := rl.LoadWaveFromMemory(".ogg", item.data, int32(len(item.data)))
-	if !rl.IsWaveValid(wave) {
-		if wave.Data != nil {
-			rl.UnloadWave(wave)
-		}
-		return errors.New("invalid music wave")
+func closeStreamDecoder(item *stream) {
+	if item.decoder != nil {
+		item.decoder.close()
+		item.decoder = nil
 	}
-	samples, err := waveSamples(wave)
-	rl.UnloadWave(wave)
+	item.queue = nil
+	item.queued, item.readIndex = 0, 0
+}
+
+// fillStream runs on the owner thread, never in the device callback. Its
+// producer cursor can run ahead and wrap repeatedly; the consumer's cursor
+// and marker decisions remain sample-accurate in renderStream.
+func fillStream(item *stream) error {
+	for item.queued < streamBufferFrames {
+		if item.loopEnd > 0 && item.decodePos >= item.loopEnd {
+			if err := item.decoder.seek(item.loopStart); err != nil {
+				return err
+			}
+			item.decodePos = item.loopStart
+		}
+		if item.decodePos >= item.frames {
+			break
+		}
+		writeIndex := (item.readIndex + item.queued) % streamBufferFrames
+		count := min(streamBufferFrames-item.queued, streamBufferFrames-writeIndex, decodeChunkFrames)
+		limit := item.frames
+		if item.loopEnd > 0 {
+			limit = item.loopEnd
+		}
+		count = int(min(int64(count), limit-item.decodePos))
+		if count <= 0 {
+			return errors.New("invalid stream decode position")
+		}
+		read, err := item.decoder.read(item.queue[writeIndex*2 : (writeIndex+count)*2])
+		if err != nil {
+			return err
+		}
+		if read != count {
+			return errors.New("truncated music stream")
+		}
+		item.queued += read
+		item.decodePos += int64(read)
+	}
+	return nil
+}
+
+func (native *raylibDevice) playStream(item *stream) error {
+	decoder, err := openVorbis(item.data)
 	if err != nil {
 		return err
 	}
-	if int64(len(samples)/2) != item.frames {
-		return errors.New("decoded music length changed")
-	}
+	return native.startDecodedStream(item, decoder)
+}
+
+func (native *raylibDevice) startDecodedStream(item *stream, decoder streamDecoder) error {
 	native.mu.Lock()
-	item.pcm = samples
+	defer native.mu.Unlock()
+	item.playing = false
+	closeStreamDecoder(item)
+	item.decoder = decoder
+	item.queue = make([]float32, streamBufferFrames*2)
+	item.decodePos = item.position
+	item.underrun = false
+	if item.position < 0 || item.position > item.frames {
+		closeStreamDecoder(item)
+		return errors.New("invalid stream position")
+	}
+	if item.position > 0 && item.position < item.frames {
+		if err := decoder.seek(item.position); err != nil {
+			closeStreamDecoder(item)
+			return err
+		}
+	}
+	if err := fillStream(item); err != nil {
+		closeStreamDecoder(item)
+		return err
+	}
 	item.playing = true
 	item.paused = false
 	item.held = false
 	item.result = ""
-	native.mu.Unlock()
 	return nil
 }
 func (native *raylibDevice) stopStream(item *stream) {
 	native.mu.Lock()
 	item.playing = false
-	item.pcm, item.tail = nil, nil
+	closeStreamDecoder(item)
+	item.tail = nil
 	native.mu.Unlock()
 }
 func (native *raylibDevice) pauseStream(item *stream) {
@@ -303,8 +380,28 @@ func (native *raylibDevice) resumeStream(item *stream) {
 	}
 	native.mu.Unlock()
 }
-func (native *raylibDevice) updateStream(_ *stream) bool {
-	return rl.IsAudioDeviceReady() && rl.IsAudioStreamValid(native.output)
+func (native *raylibDevice) updateStream(item *stream) error {
+	if !rl.IsAudioDeviceReady() || !rl.IsAudioStreamValid(native.output) {
+		return session.AudioUnavailable
+	}
+	return native.refillStream(item)
+}
+
+func (native *raylibDevice) refillStream(item *stream) error {
+	native.mu.Lock()
+	defer native.mu.Unlock()
+	if item.underrun {
+		item.playing = false
+		return fmt.Errorf("%w: stream buffer exhausted", session.AudioUnavailable)
+	}
+	if item.decoder != nil && item.playing && !item.paused && !item.held && item.result != "tail" {
+		if err := fillStream(item); err != nil {
+			item.playing = false
+			closeStreamDecoder(item)
+			return fmt.Errorf("%w: %w", session.ContentInvalid, err)
+		}
+	}
+	return nil
 }
 func (native *raylibDevice) streamVolume(item *stream, volume float32) {
 	native.mu.Lock()
@@ -416,14 +513,15 @@ func renderStream(item *stream, output []float32, frames int) {
 			item.tailFrame++
 			continue
 		}
-		index := int(item.position) * 2
-		if index < 0 || index+1 >= len(item.pcm) {
-			item.playing = false
-			item.result = "ended"
+		if item.queued == 0 {
+			item.underrun = true
 			break
 		}
-		output[2*frame] += item.pcm[index] * item.volume
-		output[2*frame+1] += item.pcm[index+1] * item.volume
+		index := item.readIndex * 2
+		output[2*frame] += item.queue[index] * item.volume
+		output[2*frame+1] += item.queue[index+1] * item.volume
+		item.readIndex = (item.readIndex + 1) % streamBufferFrames
+		item.queued--
 		item.position++
 	}
 	streamBoundary(item)

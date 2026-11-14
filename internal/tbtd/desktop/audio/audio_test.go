@@ -6,8 +6,10 @@ package audio
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"math"
 	"slices"
 	"sync"
@@ -27,6 +29,7 @@ type fakeDevice struct {
 	failLoad   int
 	loads      int
 	failStream bool
+	streamErr  error
 	calls      []string
 	playing    map[*sound]bool
 	positions  map[*stream]float32
@@ -122,9 +125,12 @@ func (fake *fakeDevice) resumeStream(item *stream) {
 		item.result = ""
 	}
 }
-func (fake *fakeDevice) updateStream(item *stream) bool {
+func (fake *fakeDevice) updateStream(item *stream) error {
+	if fake.streamErr != nil {
+		return fake.streamErr
+	}
 	if fake.failStream || !fake.ready() {
-		return false
+		return session.AudioUnavailable
 	}
 	item.position = int64(float64(fake.positions[item]) * 48000)
 	before := item.result
@@ -133,7 +139,7 @@ func (fake *fakeDevice) updateStream(item *stream) bool {
 		fake.plays++
 	}
 	fake.positions[item] = float32(item.position) / 48000
-	return true
+	return nil
 }
 func (fake *fakeDevice) streamVolume(item *stream, volume float32) {
 	fake.volumes[item] = volume
@@ -484,6 +490,125 @@ func TestStreamsMixPauseAndFocus(t *testing.T) {
 	}
 }
 
+// A synthetic mono 48 kHz Vorbis stream, 4096 frames long. Its varying
+// nonzero samples make incorrect seeks and loop boundaries observable; it is
+// solely a test fixture, not a production audio export.
+const testOggBase64 = "T2dnUwACAAAAAAAAAAABAAAAAAAAAFU2P7gBHgF2b3JiaXMAAAAAAYC7AAAAAAAAAAAAAAAAAABmAU9nZ1MAAAAAAAAAAAAAAQAAAAEAAADe7ez4AhA9A3ZvcmJpcwAAAAAAAAAAAQV2b3JiaXMAQkNWAQABAACAAAAAAAgAABQDAQAAIAAAUEAAAAAAAAQAwAMAAAAQAAAAAAAAAAAAAAAAAAJPZ2dTAADgBAAAAAAAAAEAAAACAAAAMTJUQigFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFWtICAABe1gIAAGLaAgAAZt4CAABq4gIAAG7mAgAAcuoCAAB27gIAAHryAgAAfvYCAACC+gIAAIb+AgAAigIDAACOBgMAAJIKAwAAlg4DAACaEgMAAJ4WAwAAohoDAACmHgMAAKoiAwAAriYDAACyKgMAALYuAwAAujIDAAC+NgMAAMI6AwAAxj4DAADKQgMAAM5GAwAA0koDAADWTgMAANpSAwAA3lYDAADiWgMAAOZeAwAA6mIDAADuZgMAAPJqAwAA9m4DAABPZ2dTAADgCQAAAAAAAAEAAAADAAAAGMJslSgFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUF+nIDAAD+dgMAAAJ7AwAABn8DAAAKgwMAAA6HAwAAEosDAAAWjwMAABqTAwAAHpcDAAAimwMAACafAwAAKqMDAAAupwMAADKrAwAANq8DAAA6swMAAD63AwAAQrsDAABGvwMAAErDAwAATscDAABSywMAAFbPAwAAWtMDAABe1wMAAGLbAwAAZt8DAABq4wMAAG7nAwAActMCAAB21wIAAHrbAgAAft8CAACC4wIAAIbnAgAAiusCAACO7wIAAJLzAgAAlvcCAABPZ2dTAADgDgAAAAAAAAEAAAAEAAAA5y4B6igFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFmvsCAACe/wIAAKIDAwAApgcDAACqCwMAAK4PAwAAshMDAAC2FwMAALobAwAAvh8DAADCIwMAAMYnAwAAyisDAADOLwMAANIzAwAA1jcDAADaOwMAAN4/AwAA4kMDAADmRwMAAFpKAwAAXk4DAABiUgMAAGZWAwAAaloDAABuXgMAAHJiAwAAdmYDAAB6agMAAH5uAwAAgnIDAACGdgMAAIp6AwAAjn4DAACSggMAAJaGAwAAmooDAACejgMAAKKSAwAAppYDAABPZ2dTAAQAEAAAAAAAAAEAAAAFAAAA7RQSfwkFBQUFBQUFBQWqmgMAAK6eAwAAsqIDAAC2pgMAALqqAwAAvq4DAADCsgMAAMa2AwAAyroDAAA="
+
+func realOggFixture(t *testing.T) []byte {
+	t.Helper()
+	data, err := base64.StdEncoding.DecodeString(testOggBase64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+func openFixtureDecoder(t *testing.T, data []byte) streamDecoder {
+	t.Helper()
+	decoder, err := openVorbis(data)
+	if errors.Is(err, session.AudioUnavailable) {
+		t.Skip("native Vorbis decoder unavailable on this build")
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(decoder.close)
+	return decoder
+}
+
+func TestNativeVorbisDecodeSeekAndLoop(t *testing.T) {
+	const frames = 4096
+	data := realOggFixture(t)
+	decoder := openFixtureDecoder(t, data)
+	defer decoder.close()
+	baseline := make([]float32, frames*2)
+	offset := 0
+	for _, size := range []int{1, 33, 257, 1024, 2048, 733} {
+		count, err := decoder.read(baseline[offset*2 : (offset+size)*2])
+		if err != nil || count != size {
+			t.Fatalf("decode at %d: frames=%d error=%v", offset, count, err)
+		}
+		offset += count
+	}
+	if offset != frames {
+		t.Fatalf("decoded %d frames", offset)
+	}
+	golden := []int16{-76, 582, 512, -779, -712, -556, 146, 280, -365, -107}
+	for i, sample := range golden {
+		want := float32(sample) / 32768
+		if baseline[(77+i)*2] != want || baseline[(77+i)*2+1] != want {
+			t.Fatalf("frame %d: %v, want duplicated mono %v", 77+i, baseline[(77+i)*2:(78+i)*2], want)
+		}
+	}
+	for _, position := range []int{0, 1, 31, 32, 77, 1279, 1280, 2559, 2560, 3839, 4095} {
+		if err := decoder.seek(int64(position)); err != nil {
+			t.Fatalf("seek %d: %v", position, err)
+		}
+		count := min(19, frames-position)
+		got := make([]float32, count*2)
+		n, err := decoder.read(got)
+		if err != nil || n != count || !slices.Equal(got, baseline[position*2:(position+count)*2]) {
+			t.Fatalf("seek %d: frames=%d error=%v, samples=%v", position, n, err, got)
+		}
+	}
+	decoder.close()
+	decoder.close()
+
+	item := &stream{data: data, frames: frames, loopStart: 77, loopEnd: 1473, volume: 1}
+	native := &raylibDevice{streams: []*stream{item}}
+	if err := native.playStream(item); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { native.unloadStream(item) })
+	if len(item.queue) != streamBufferFrames*2 || item.queued != streamBufferFrames {
+		t.Fatal("native decoder did not use the bounded queue")
+	}
+	var position int64
+	for _, size := range []int{101, 32000, 4096, 731} {
+		output := make([]float32, size*2)
+		native.renderStreams(output, size)
+		for i := 0; i < size; i++ {
+			if position == item.loopEnd {
+				position = item.loopStart
+			}
+			index := int(position) * 2
+			if output[2*i] != baseline[index] || output[2*i+1] != baseline[index+1] {
+				t.Fatalf("loop source frame %d: got %v, want %v", position, output[2*i:2*i+2], baseline[index:index+2])
+			}
+			position++
+		}
+		if err := native.refillStream(item); err != nil {
+			t.Fatal(err)
+		}
+	}
+	owned := item.decoder
+	native.stopStream(item)
+	native.stopStream(item)
+	native.unloadStream(item)
+	native.unloadStream(item)
+	owned.close()
+	if item.decoder != nil || item.queue != nil || item.data != nil {
+		t.Fatal("native stream cleanup retained resources")
+	}
+}
+
+func TestNativeVorbisTruncatedPayload(t *testing.T) {
+	data := realOggFixture(t)
+	decoder := openFixtureDecoder(t, data[:len(data)-20])
+	item := &stream{frames: 4096}
+	native := &raylibDevice{}
+	if err := native.startDecodedStream(item, decoder); err == nil {
+		native.stopStream(item)
+		t.Fatal("truncated audio payload accepted")
+	}
+	decoder.close()
+	decoder.close()
+	if item.decoder != nil || item.queue != nil || item.playing {
+		t.Fatal("failed decode retained resources")
+	}
+}
+
 func TestStreamFormatBounds(t *testing.T) {
 	point := func(value int64) *int64 { return &value }
 	for _, tc := range []struct {
@@ -525,11 +650,45 @@ func TestStreamFormatBounds(t *testing.T) {
 	if _, err := device.loadStream([]byte{1}, nil); err == nil {
 		t.Fatal("missing metadata accepted")
 	}
+	if decoder, err := openVorbis([]byte("not an ogg stream")); err == nil {
+		decoder.close()
+		t.Fatal("invalid compressed stream accepted")
+	}
+}
+
+type memoryDecoder struct {
+	samples  []float32
+	position int
+}
+
+func (decoder *memoryDecoder) read(output []float32) (int, error) {
+	count := copy(output, decoder.samples[decoder.position:])
+	decoder.position += count
+	return count / 2, nil
+}
+
+func (decoder *memoryDecoder) seek(frame int64) error {
+	if frame < 0 || frame > int64(len(decoder.samples)/2) {
+		return errors.New("invalid seek")
+	}
+	decoder.position = int(frame) * 2
+	return nil
+}
+
+func (*memoryDecoder) close() {}
+
+func startMemoryTrack(t *testing.T, item *stream, samples []float32) {
+	t.Helper()
+	if err := (&raylibDevice{}).startDecodedStream(item, &memoryDecoder{samples: samples}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestLoopOvershootIsPreserved(t *testing.T) {
 	newTrack := func() *stream {
-		return &stream{pcm: []float32{1, 1, 2, 2, 3, 3, 4, 4}, frames: 4, loopStart: 1, loopEnd: 3, playing: true, volume: 1}
+		item := &stream{frames: 4, loopStart: 1, loopEnd: 3, volume: 1}
+		startMemoryTrack(t, item, []float32{1, 1, 2, 2, 3, 3, 4, 4})
+		return item
 	}
 	whole := make([]float32, 24)
 	renderStream(newTrack(), whole, 12)
@@ -554,7 +713,9 @@ func TestStreamOutputBoundaries(t *testing.T) {
 		return result
 	}
 	newTrack := func() *stream {
-		return &stream{pcm: pcm(10, 11, 12, 13, 14, 15, 16, 17), frames: 8, loopStart: 2, loopEnd: 6, playing: true, volume: 1}
+		item := &stream{frames: 8, loopStart: 2, loopEnd: 6, volume: 1}
+		startMemoryTrack(t, item, pcm(10, 11, 12, 13, 14, 15, 16, 17))
+		return item
 	}
 	render := func(native *raylibDevice, chunks ...int) []float32 {
 		var result []float32
@@ -635,7 +796,8 @@ func TestStreamOutputBoundaries(t *testing.T) {
 }
 
 func TestStreamCallbackAndControlsAreSynchronized(t *testing.T) {
-	item := &stream{pcm: []float32{1, 1, 2, 2, 3, 3}, frames: 3, loopStart: 1, loopEnd: 3, playing: true, volume: 1}
+	item := &stream{frames: 3, loopStart: 1, loopEnd: 3, volume: 1}
+	startMemoryTrack(t, item, []float32{1, 1, 2, 2, 3, 3})
 	native := &raylibDevice{streams: []*stream{item}}
 	var done sync.WaitGroup
 	done.Add(1)
@@ -669,7 +831,7 @@ func TestMixerSchedulesSampleBoundaryBeforeOutput(t *testing.T) {
 	if err := mixer.Update(ctx, frameView(t, session.StateActive, event(id, 1), transitionEvent(id, "transition", "tail", 2)), f); err != nil {
 		t.Fatal(err)
 	}
-	item.stream.pcm = []float32{1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8}
+	startMemoryTrack(t, item.stream, []float32{1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8})
 	item.stream.volume = 1
 	output := make([]float32, 16)
 	(&raylibDevice{streams: []*stream{item.stream}}).renderStreams(output[:6], 3)
@@ -1343,6 +1505,21 @@ func TestCallbackCompletionSurvivesDeviceLossBeforePoll(t *testing.T) {
 	}
 }
 
+func TestStreamDecodeFailureIsNotDeviceLoss(t *testing.T) {
+	mixer, fake := makeMixer(t)
+	ctx := context.Background()
+	if err := mixer.startStream(ctx, "MUS-INS-EXP"); err != nil {
+		t.Fatal(err)
+	}
+	fake.streamErr = fmt.Errorf("%w: truncated stream", session.ContentInvalid)
+	if err := mixer.Update(ctx, frameView(t, session.StateActive), frame()); !errors.Is(err, session.ContentInvalid) || mixer.failed {
+		t.Fatalf("invalid content misclassified: %v", err)
+	}
+	if err := mixer.ContinueSilent(ctx); !errors.Is(err, session.InvalidAction) {
+		t.Fatalf("invalid content bypassed: %v", err)
+	}
+}
+
 func TestStreamFailureAndOwnerThread(t *testing.T) {
 	ctx := context.Background()
 	files, records, fake := fixture(t)
@@ -1376,6 +1553,181 @@ func TestStreamFailureAndOwnerThread(t *testing.T) {
 	}
 	if err = mixer.Close(ctx); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// sampleDecoder models the external decoder without allocating a whole track.
+// Its frame values make discontinuities and accidental replays observable.
+type sampleDecoder struct {
+	position  int64
+	length    int64
+	readMax   int
+	readTotal int64
+	failRead  bool
+	shortRead bool
+	failSeek  bool
+	closed    int
+}
+
+func (decoder *sampleDecoder) read(output []float32) (int, error) {
+	if decoder.failRead {
+		return 0, errors.New("decode failure")
+	}
+	count := len(output) / 2
+	decoder.readMax = max(decoder.readMax, count)
+	count = int(min(int64(count), decoder.length-decoder.position))
+	if decoder.shortRead && count > 0 {
+		count--
+	}
+	for i := 0; i < count; i++ {
+		value := float32((decoder.position+int64(i))%97 + 1)
+		output[i*2], output[i*2+1] = value, -value
+	}
+	decoder.position += int64(count)
+	decoder.readTotal += int64(count)
+	return count, nil
+}
+
+func (decoder *sampleDecoder) seek(frame int64) error {
+	if decoder.failSeek {
+		return errors.New("seek failure")
+	}
+	decoder.position = frame
+	return nil
+}
+
+func (decoder *sampleDecoder) close() { decoder.closed++ }
+
+func TestIncrementalStreamBufferAndLoopContinuity(t *testing.T) {
+	const length = 48000 * 600
+	decoder := &sampleDecoder{length: length}
+	item := &stream{frames: length, loopStart: 1234, loopEnd: 35001, volume: 1}
+	native := &raylibDevice{streams: []*stream{item}}
+	if err := native.startDecodedStream(item, decoder); err != nil {
+		t.Fatal(err)
+	}
+	if len(item.queue) != streamBufferFrames*2 || item.queued != streamBufferFrames || decoder.readTotal != streamBufferFrames || decoder.readMax > decodeChunkFrames {
+		t.Fatalf("unbounded prefetch: queue=%d total=%d max=%d", len(item.queue), decoder.readTotal, decoder.readMax)
+	}
+	var position int64
+	for _, chunk := range []int{123, 4097, 8191, 7777, 12000, 17000, 14000, 4000} {
+		output := make([]float32, chunk*2)
+		native.renderStreams(output, chunk)
+		for i := 0; i < chunk; i++ {
+			if position == item.loopEnd {
+				position = item.loopStart
+			}
+			want := float32(position%97 + 1)
+			if output[2*i] != want || output[2*i+1] != -want {
+				t.Fatalf("frame %d: %v, want %v", position, output[2*i:2*i+2], want)
+			}
+			position++
+		}
+		native.mu.Lock()
+		err := fillStream(item)
+		native.mu.Unlock()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if item.queued > streamBufferFrames || decoder.readMax > decodeChunkFrames {
+			t.Fatal("stream buffer grew beyond its bound")
+		}
+	}
+	native.stopStream(item)
+	native.stopStream(item)
+	if decoder.closed != 1 || item.decoder != nil || item.queue != nil {
+		t.Fatal("decoder not released exactly once")
+	}
+}
+
+func TestIncrementalStreamTransitionsAndCleanup(t *testing.T) {
+	for _, action := range []string{"hold", "stop", "tail"} {
+		t.Run(action, func(t *testing.T) {
+			decoder := &sampleDecoder{length: 100000}
+			item := &stream{frames: decoder.length, loopStart: 7, loopEnd: 20000, volume: 1}
+			native := &raylibDevice{streams: []*stream{item}}
+			if err := native.startDecodedStream(item, decoder); err != nil {
+				t.Fatal(err)
+			}
+			if err := native.streamTransition(item, &streamTransition{marker: 6, action: action}, &sound{tail: []float32{50, -50, 51, -51}}); err != nil {
+				t.Fatal(err)
+			}
+			output := make([]float32, 20)
+			native.renderStreams(output[:6], 3)
+			native.renderStreams(output[6:], 7)
+			want := []float32{1, -1, 2, -2, 3, -3, 4, -4, 5, -5, 6, -6, 0, 0, 0, 0, 0, 0, 0, 0}
+			if action == "tail" {
+				copy(want[12:], []float32{50, -50, 51, -51})
+			}
+			if !slices.Equal(output, want) {
+				t.Fatalf("%s: %v", action, output)
+			}
+			if action == "hold" {
+				native.resumeStream(item)
+				resumed := make([]float32, 2)
+				native.renderStreams(resumed, 1)
+				if !slices.Equal(resumed, []float32{7, -7}) {
+					t.Fatalf("resume skipped queued sample: %v", resumed)
+				}
+			}
+			native.unloadStream(item)
+			native.unloadStream(item)
+			if decoder.closed != 1 || item.queue != nil {
+				t.Fatal("unload failed to close decoder exactly once")
+			}
+		})
+	}
+}
+
+func TestIncrementalDecodeFailuresAndUnderrun(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		decoder *sampleDecoder
+		start   int64
+	}{
+		{"read", &sampleDecoder{length: 100000, failRead: true}, 0},
+		{"short read", &sampleDecoder{length: 100000, shortRead: true}, 0},
+		{"seek", &sampleDecoder{length: 100000, failSeek: true}, 42},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			item := &stream{frames: tc.decoder.length, position: tc.start}
+			native := &raylibDevice{}
+			if err := native.startDecodedStream(item, tc.decoder); err == nil || tc.decoder.closed != 1 || item.decoder != nil || item.queue != nil {
+				t.Fatalf("failed start leaked resources: %v", err)
+			}
+		})
+	}
+	decoder := &sampleDecoder{length: 100000}
+	item := &stream{frames: decoder.length, volume: 1}
+	native := &raylibDevice{streams: []*stream{item}}
+	if err := native.startDecodedStream(item, decoder); err != nil {
+		t.Fatal(err)
+	}
+	native.renderStreams(make([]float32, (streamBufferFrames+1)*2), streamBufferFrames+1)
+	if !item.underrun || item.position != streamBufferFrames {
+		t.Fatal("underrun must not advance the source cursor")
+	}
+	if err := native.refillStream(item); !errors.Is(err, session.AudioUnavailable) {
+		t.Fatalf("underrun misclassified: %v", err)
+	}
+	native.stopStream(item)
+	if decoder.closed != 1 {
+		t.Fatal("underrun decoder not closed")
+	}
+	decoder = &sampleDecoder{length: 100000}
+	item = &stream{frames: decoder.length, volume: 1}
+	native = &raylibDevice{streams: []*stream{item}}
+	if err := native.startDecodedStream(item, decoder); err != nil {
+		t.Fatal(err)
+	}
+	native.renderStreams(make([]float32, 20), 10)
+	decoder.failRead = true
+	if err := native.refillStream(item); !errors.Is(err, session.ContentInvalid) || item.playing || item.decoder != nil {
+		t.Fatalf("decode failure misclassified or still playing: %v", err)
+	}
+	native.stopStream(item)
+	if decoder.closed != 1 {
+		t.Fatal("failed decoder not closed")
 	}
 }
 

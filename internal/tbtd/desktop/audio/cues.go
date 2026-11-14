@@ -1,218 +1,84 @@
 // Copyright (C) 2026 crawter
 // All rights reserved.
 
+//go:build linux && cgo
+
 package audio
 
-import (
-	"context"
-	"fmt"
-	"strings"
-	"time"
+/*
+typedef struct stb_vorbis stb_vorbis;
+typedef struct stb_vorbis_alloc stb_vorbis_alloc;
+extern stb_vorbis *stb_vorbis_open_memory(const unsigned char *, int, int *, const stb_vorbis_alloc *);
+extern int stb_vorbis_seek(stb_vorbis *, unsigned int);
+extern int stb_vorbis_get_samples_short_interleaved(stb_vorbis *, int, short *, int);
+extern int stb_vorbis_get_error(stb_vorbis *);
+extern void stb_vorbis_close(stb_vorbis *);
+*/
+import "C"
 
-	"too-broke-to-die/internal/tbtd/session"
+import (
+	"errors"
+	"fmt"
+	"runtime"
+	"unsafe"
 )
 
-type transientID struct {
-	tick    uint64
-	entity  string
-	ordinal uint32
+// vorbisDecoder uses the stb_vorbis already linked into raylib. Its input is
+// pinned and retained until close because the C decoder stores its address.
+// PCM transfers use a temporary int16 slice: Linux C short is 16-bit and has
+// the same alignment and representation as Go int16. C does not retain it.
+type vorbisDecoder struct {
+	value *C.stb_vorbis
+	pin   runtime.Pinner
+	data  []byte
 }
 
-type durableID struct {
-	revision  uint64
-	operation session.OperationID
-	kind      string
+func openVorbis(data []byte) (streamDecoder, error) {
+	if len(data) == 0 || len(data) > maxAudioBytes {
+		return nil, errors.New("invalid compressed audio")
+	}
+	decoder := &vorbisDecoder{data: data}
+	decoder.pin.Pin(&data[0])
+	var code C.int
+	decoder.value = C.stb_vorbis_open_memory((*C.uchar)(unsafe.Pointer(&data[0])), C.int(len(data)), &code, nil)
+	if decoder.value == nil {
+		decoder.pin.Unpin()
+		return nil, fmt.Errorf("vorbis open: error %d", int(code))
+	}
+	return decoder, nil
 }
 
-func (mixer *Mixer) acceptEvent(event session.SemanticEvent, data session.FrameViewData) bool {
-	if event.Kind == "" || data.State == session.StateRestoring || data.RestorationReady {
-		return false
+func (decoder *vorbisDecoder) read(output []float32) (int, error) {
+	if len(output) == 0 || len(output)%2 != 0 || len(output) > decodeChunkFrames*2 {
+		return 0, errors.New("invalid decode buffer")
 	}
-	if event.Durable {
-		if event.Revision == 0 || event.Revision > data.Progress.Revision || event.Operation.Event == "" || event.Operation.Sequence == 0 {
-			return false
-		}
-		id := durableID{revision: event.Revision, operation: event.Operation, kind: event.Kind}
-		if mixer.durable[id] {
-			return false
-		}
-		mixer.durable[id] = true
-		return true
+	var samples [decodeChunkFrames * 2]int16
+	count := int(C.stb_vorbis_get_samples_short_interleaved(decoder.value, 2, (*C.short)(unsafe.Pointer(&samples[0])), C.int(len(output))))
+	code := int(C.stb_vorbis_get_error(decoder.value))
+	if code != 0 {
+		return 0, fmt.Errorf("vorbis decode: error %d", code)
 	}
-	if event.Entity == "" {
-		return false
+	for i := 0; i < count*2; i++ {
+		output[i] = float32(samples[i]) / 32768
 	}
-	id := transientID{tick: event.Tick, entity: event.Entity, ordinal: event.Ordinal}
-	if mixer.transient[id] {
-		return false
-	}
-	mixer.transient[id] = true
-	return true
+	return count, nil
 }
 
-// effectCue maps the session's tick-stamped simulation effects, never a
-// decorative particle or visual bounce, to their corresponding sound family.
-func effectCue(effect session.EffectEvent) (session.SemanticEvent, bool) {
-	var id string
-	switch effect.Kind {
-	case "hit":
-		id = "SFX-BODY-IMPACT"
-		if effect.Entity == "player" {
-			id = "SFX-BODY-HURT"
-		}
-	case "removal":
-		id = "SFX-BODY-TEAR"
-	case "feces":
-		id = "SFX-FEC-HIT"
-	default:
-		return session.SemanticEvent{}, false
+func (decoder *vorbisDecoder) seek(frame int64) error {
+	if frame < 0 || frame > 48000*600 {
+		return errors.New("invalid vorbis seek")
 	}
-	return session.SemanticEvent{Kind: "effect", Tick: effect.Tick, Entity: effect.Entity, Ordinal: effect.Ordinal, Parameters: []session.EventParameter{{Name: "asset", Value: id}}}, true
-}
-
-func eventAsset(event session.SemanticEvent) string {
-	for _, parameter := range event.Parameters {
-		if parameter.Name == "asset" {
-			return parameter.Value
-		}
-	}
-	switch event.Kind {
-	case "saved":
-		return "SFX-UI-SAVED"
-	case "receipt":
-		return "STG-CREDIT"
-	case "victory":
-		return "STG-VICTORY"
-	case "warning":
-		return "SFX-WARN-ENEMY"
-	default:
-		return ""
-	}
-}
-
-func (mixer *Mixer) playEvent(ctx context.Context, event session.SemanticEvent, data session.FrameViewData, frame Frame, paused bool) (err error) {
-	defer mon.Task()(&ctx)(&err)
-	id := eventAsset(event)
-	if id == "" {
-		return nil
-	}
-	// Reward cues must be explicitly acknowledged, never inferred from a save
-	// proposal, screen transition, animation, or a changed credit count.
-	if (id == "STG-CREDIT" || id == "STG-VICTORY" || event.Kind == "receipt" || event.Kind == "victory") && (!event.Durable || data.Save == session.SavePending) {
-		return nil
-	}
-	item := mixer.assets[id]
-	if item == nil {
-		return fmt.Errorf("%w: %s: audio not in current group", session.ContentInvalid, id)
-	}
-	menu := strings.HasPrefix(id, "SFX-UI-")
-	if (!frame.Focused || paused) && !menu {
-		return nil
-	}
-	if item.stream != nil {
-		return mixer.startStream(ctx, id)
-	}
-	if len(item.sounds) == 0 {
-		return fmt.Errorf("%w: %s: no audio export", session.ContentInvalid, id)
-	}
-	priority := priorityFor(id)
-	chant := strings.HasPrefix(id, "VOC-TRE-")
-	if chant {
-		if (mixer.hadChant && mixer.clock-mixer.lastChant < 4*time.Second) || mixer.foregroundChant() {
-			return nil
-		}
-	}
-	index := mixer.voiceSlot(priority)
-	if index < 0 {
-		return nil
-	}
-	mixer.releaseVoice(index)
-	variation := int(event.Ordinal % uint32(len(item.sounds)))
-	alias, err := mixer.native.alias(item.sounds[variation])
-	if err != nil {
-		mixer.failed = true
-		return fmt.Errorf("%w: %w", session.AudioUnavailable, err)
-	}
-	vocal := item.record.Kind == "vocal"
-	mixer.voices[index] = voice{sound: alias, priority: priority, menu: menu, vocal: vocal, chant: chant}
-	mixer.native.playSound(alias, voiceVolume(frame.Settings, vocal), 0.5)
-	if chant {
-		mixer.hadChant = true
-		mixer.lastChant = mixer.clock
+	if C.stb_vorbis_seek(decoder.value, C.uint(frame)) == 0 {
+		return errors.New("vorbis seek failed")
 	}
 	return nil
 }
 
-type voice struct {
-	sound    *sound
-	priority int
-	menu     bool
-	vocal    bool
-	music    bool
-	chant    bool
-	paused   bool
-}
-
-func priorityFor(id string) int {
-	switch {
-	case strings.HasPrefix(id, "SFX-WARN-"), strings.Contains(id, "-PREP"), id == "STG-CONSEQUENCE":
-		return 6
-	case strings.HasPrefix(id, "SFX-UI-"), strings.HasPrefix(id, "STG-"):
-		return 5
-	case strings.HasPrefix(id, "VOC-"):
-		return 4
-	default:
-		return 3
-	}
-}
-
-func (mixer *Mixer) voiceSlot(priority int) int {
-	lowest := -1
-	for i, voice := range mixer.voices {
-		if voice.sound == nil {
-			return i
-		}
-		if voice.priority < priority && (lowest < 0 || voice.priority < mixer.voices[lowest].priority) {
-			lowest = i
-		}
-	}
-	return lowest
-}
-
-func (mixer *Mixer) foregroundChant() bool {
-	for _, voice := range mixer.voices {
-		if voice.sound != nil && voice.chant {
-			return true
-		}
-	}
-	return false
-}
-
-func (mixer *Mixer) releaseVoice(index int) {
-	current := &mixer.voices[index]
-	if current.sound != nil {
-		mixer.native.stopSound(current.sound)
-		mixer.native.unloadAlias(current.sound)
-	}
-	*current = voice{}
-}
-
-func (mixer *Mixer) advanceVoices(paused, unfocused bool) {
-	for i := range mixer.voices {
-		voice := &mixer.voices[i]
-		if voice.sound == nil {
-			continue
-		}
-		freeze := (paused && !voice.menu) || (unfocused && (voice.vocal || voice.music))
-		if freeze && !voice.paused {
-			mixer.native.pauseSound(voice.sound)
-			voice.paused = true
-		} else if !freeze && voice.paused {
-			mixer.native.resumeSound(voice.sound)
-			voice.paused = false
-		}
-		if !voice.paused && !mixer.native.playingSound(voice.sound) {
-			mixer.releaseVoice(i)
-		}
+func (decoder *vorbisDecoder) close() {
+	if decoder.value != nil {
+		C.stb_vorbis_close(decoder.value)
+		decoder.value = nil
+		decoder.pin.Unpin()
+		decoder.data = nil
 	}
 }

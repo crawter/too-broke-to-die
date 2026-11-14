@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"strings"
 	"time"
 
 	monkit "github.com/spacemonkeygo/monkit/v3"
@@ -222,6 +223,10 @@ func (mixer *Mixer) Update(ctx context.Context, view session.FrameView, frame Fr
 			}
 		}
 		if err = mixer.playEvent(ctx, event, data, frame, paused); err != nil {
+			if errors.Is(err, session.AudioUnavailable) {
+				mixer.captureStreamResults()
+				mixer.failed = true
+			}
 			return err
 		}
 	}
@@ -230,12 +235,18 @@ func (mixer *Mixer) Update(ctx context.Context, view session.FrameView, frame Fr
 	} else {
 		if mixer.needsResume && frame.Focused && !paused {
 			if err = mixer.resumeStreams(ctx); err != nil {
+				if errors.Is(err, session.AudioUnavailable) {
+					mixer.captureStreamResults()
+					mixer.failed = true
+				}
 				return err
 			}
 		}
 		if err = mixer.advanceStreams(frame, paused); err != nil {
-			mixer.captureStreamResults()
-			mixer.failed = true
+			if errors.Is(err, session.AudioUnavailable) {
+				mixer.captureStreamResults()
+				mixer.failed = true
+			}
 			return err
 		}
 		mixer.updateMix(frame)
@@ -256,5 +267,302 @@ func (mixer *Mixer) Close(ctx context.Context) (err error) {
 		mixer.closeDevice(ctx)
 		mixer.closed = true
 	}
+	return nil
+}
+
+type transientID struct {
+	tick    uint64
+	entity  string
+	ordinal uint32
+}
+
+type durableID struct {
+	revision  uint64
+	operation session.OperationID
+	kind      string
+}
+
+func (mixer *Mixer) acceptEvent(event session.SemanticEvent, data session.FrameViewData) bool {
+	if event.Kind == "" || data.State == session.StateRestoring || data.RestorationReady {
+		return false
+	}
+	if event.Durable {
+		if event.Revision == 0 || event.Revision > data.Progress.Revision || event.Operation.Event == "" || event.Operation.Sequence == 0 {
+			return false
+		}
+		id := durableID{revision: event.Revision, operation: event.Operation, kind: event.Kind}
+		if mixer.durable[id] {
+			return false
+		}
+		mixer.durable[id] = true
+		return true
+	}
+	if event.Entity == "" {
+		return false
+	}
+	id := transientID{tick: event.Tick, entity: event.Entity, ordinal: event.Ordinal}
+	if mixer.transient[id] {
+		return false
+	}
+	mixer.transient[id] = true
+	return true
+}
+
+// effectCue maps the session's tick-stamped simulation effects, never a
+// decorative particle or visual bounce, to their corresponding sound family.
+func effectCue(effect session.EffectEvent) (session.SemanticEvent, bool) {
+	var id string
+	switch effect.Kind {
+	case "hit":
+		id = "SFX-BODY-IMPACT"
+		if effect.Entity == "player" {
+			id = "SFX-BODY-HURT"
+		}
+	case "removal":
+		id = "SFX-BODY-TEAR"
+	case "feces":
+		id = "SFX-FEC-HIT"
+	default:
+		return session.SemanticEvent{}, false
+	}
+	return session.SemanticEvent{Kind: "effect", Tick: effect.Tick, Entity: effect.Entity, Ordinal: effect.Ordinal, Parameters: []session.EventParameter{{Name: "asset", Value: id}}}, true
+}
+
+func eventAsset(event session.SemanticEvent) string {
+	for _, parameter := range event.Parameters {
+		if parameter.Name == "asset" {
+			return parameter.Value
+		}
+	}
+	switch event.Kind {
+	case "saved":
+		return "SFX-UI-SAVED"
+	case "receipt":
+		return "STG-CREDIT"
+	case "victory":
+		return "STG-VICTORY"
+	case "warning":
+		return "SFX-WARN-ENEMY"
+	default:
+		return ""
+	}
+}
+
+func (mixer *Mixer) playEvent(ctx context.Context, event session.SemanticEvent, data session.FrameViewData, frame Frame, paused bool) (err error) {
+	defer mon.Task()(&ctx)(&err)
+	id := eventAsset(event)
+	if id == "" {
+		return nil
+	}
+	// Reward cues must be explicitly acknowledged, never inferred from a save
+	// proposal, screen transition, animation, or a changed credit count.
+	if (id == "STG-CREDIT" || id == "STG-VICTORY" || event.Kind == "receipt" || event.Kind == "victory") && (!event.Durable || data.Save == session.SavePending) {
+		return nil
+	}
+	item := mixer.assets[id]
+	if item == nil {
+		return fmt.Errorf("%w: %s: audio not in current group", session.ContentInvalid, id)
+	}
+	menu := strings.HasPrefix(id, "SFX-UI-")
+	if (!frame.Focused || paused) && !menu {
+		return nil
+	}
+	if item.stream != nil {
+		return mixer.startStream(ctx, id)
+	}
+	if len(item.sounds) == 0 {
+		return fmt.Errorf("%w: %s: no audio export", session.ContentInvalid, id)
+	}
+	priority := priorityFor(id)
+	chant := strings.HasPrefix(id, "VOC-TRE-")
+	if chant {
+		if (mixer.hadChant && mixer.clock-mixer.lastChant < 4*time.Second) || mixer.foregroundChant() {
+			return nil
+		}
+	}
+	index := mixer.voiceSlot(priority)
+	if index < 0 {
+		return nil
+	}
+	mixer.releaseVoice(index)
+	variation := int(event.Ordinal % uint32(len(item.sounds)))
+	alias, err := mixer.native.alias(item.sounds[variation])
+	if err != nil {
+		mixer.failed = true
+		return fmt.Errorf("%w: %w", session.AudioUnavailable, err)
+	}
+	vocal := item.record.Kind == "vocal"
+	mixer.voices[index] = voice{sound: alias, priority: priority, menu: menu, vocal: vocal, chant: chant}
+	mixer.native.playSound(alias, voiceVolume(frame.Settings, vocal), 0.5)
+	if chant {
+		mixer.hadChant = true
+		mixer.lastChant = mixer.clock
+	}
+	return nil
+}
+
+type voice struct {
+	sound    *sound
+	priority int
+	menu     bool
+	vocal    bool
+	music    bool
+	chant    bool
+	paused   bool
+}
+
+func priorityFor(id string) int {
+	switch {
+	case strings.HasPrefix(id, "SFX-WARN-"), strings.Contains(id, "-PREP"), id == "STG-CONSEQUENCE":
+		return 6
+	case strings.HasPrefix(id, "SFX-UI-"), strings.HasPrefix(id, "STG-"):
+		return 5
+	case strings.HasPrefix(id, "VOC-"):
+		return 4
+	default:
+		return 3
+	}
+}
+
+func (mixer *Mixer) voiceSlot(priority int) int {
+	lowest := -1
+	for i, voice := range mixer.voices {
+		if voice.sound == nil {
+			return i
+		}
+		if voice.priority < priority && (lowest < 0 || voice.priority < mixer.voices[lowest].priority) {
+			lowest = i
+		}
+	}
+	return lowest
+}
+
+func (mixer *Mixer) foregroundChant() bool {
+	for _, voice := range mixer.voices {
+		if voice.sound != nil && voice.chant {
+			return true
+		}
+	}
+	return false
+}
+
+func (mixer *Mixer) releaseVoice(index int) {
+	current := &mixer.voices[index]
+	if current.sound != nil {
+		mixer.native.stopSound(current.sound)
+		mixer.native.unloadAlias(current.sound)
+	}
+	*current = voice{}
+}
+
+func (mixer *Mixer) advanceVoices(paused, unfocused bool) {
+	for i := range mixer.voices {
+		voice := &mixer.voices[i]
+		if voice.sound == nil {
+			continue
+		}
+		freeze := (paused && !voice.menu) || (unfocused && (voice.vocal || voice.music))
+		if freeze && !voice.paused {
+			mixer.native.pauseSound(voice.sound)
+			voice.paused = true
+		} else if !freeze && voice.paused {
+			mixer.native.resumeSound(voice.sound)
+			voice.paused = false
+		}
+		if !voice.paused && !mixer.native.playingSound(voice.sound) {
+			mixer.releaseVoice(i)
+		}
+	}
+}
+
+// ContinueSilent accepts an explicitly presented AudioUnavailable choice. It
+// cannot be used to bypass missing or invalid required content.
+func (mixer *Mixer) ContinueSilent(ctx context.Context) (err error) {
+	defer mon.Task()(&ctx)(&err)
+	if err = mixer.check(); err != nil {
+		return err
+	}
+	if !mixer.failed {
+		return session.InvalidAction
+	}
+	if _, err = mixer.readGroup(ctx, mixer.group); err != nil {
+		return err
+	}
+	mixer.closeDevice(ctx)
+	mixer.silent = true
+	return nil
+}
+
+// Retry releases old handles before reopening and rebuilds only the current
+// load group. It does not replay previously consumed events.
+func (mixer *Mixer) Retry(ctx context.Context) (err error) {
+	defer mon.Task()(&ctx)(&err)
+	if err = mixer.check(); err != nil {
+		return err
+	}
+	if !mixer.failed && !mixer.silent {
+		return session.InvalidAction
+	}
+	data, err := mixer.readGroup(ctx, mixer.group)
+	if err != nil {
+		return err
+	}
+	mixer.closeDevice(ctx)
+	mixer.silent = false
+	mixer.failed = true
+	if !mixer.native.open() {
+		return session.AudioUnavailable
+	}
+	mixer.opened = true
+	if err = mixer.acquire(ctx, mixer.group, data); err != nil {
+		mixer.closeDevice(ctx)
+		return err
+	}
+	// The previous device may have left delayed samples in its limiter. A new
+	// processor starts empty only after the old device has been closed.
+	mixer.processor = newMixProcessor(ctx)
+	mixer.native.attachMixed(mixer.processor)
+	mixer.attached = true
+	mixer.needsResume = true
+	mixer.failed = false
+	return nil
+}
+
+// LoadGroup validates and replaces the shared/current audio set. The caller
+// chooses the same explicit group as the presentation cache, never a filename.
+func (mixer *Mixer) LoadGroup(ctx context.Context, group string) (err error) {
+	defer mon.Task()(&ctx)(&err)
+	if err = mixer.check(); err != nil {
+		return err
+	}
+	if !validGroup(group) {
+		return fmt.Errorf("%w: unknown audio group", session.ContentInvalid)
+	}
+	if mixer.failed && !mixer.silent {
+		return session.AudioUnavailable
+	}
+	if group == mixer.group && (mixer.silent || mixer.assets != nil) {
+		return nil
+	}
+	data, err := mixer.readGroup(ctx, group)
+	if err != nil {
+		return err
+	}
+	if mixer.silent {
+		mixer.group = group
+		mixer.pruneDesired(ctx, group)
+		return nil
+	}
+	mixer.release(ctx)
+	if err = mixer.acquire(ctx, group, data); err != nil {
+		mixer.release(ctx)
+		if !mixer.native.ready() {
+			mixer.failed = true
+			return fmt.Errorf("%w: group acquisition", session.AudioUnavailable)
+		}
+		return err
+	}
+	mixer.pruneDesired(ctx, group)
+	mixer.needsResume = true
 	return nil
 }

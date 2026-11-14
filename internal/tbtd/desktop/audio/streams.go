@@ -5,6 +5,7 @@ package audio
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"time"
@@ -138,7 +139,7 @@ func (mixer *Mixer) openSelectedStream(ctx context.Context, id string) (err erro
 	mixer.native.streamVolume(item.stream, 0)
 	mixer.native.seekStream(item.stream, float32(state.position))
 	if err = mixer.native.playStream(item.stream); err != nil {
-		if !mixer.native.ready() {
+		if !mixer.native.ready() || errors.Is(err, session.AudioUnavailable) {
 			return fmt.Errorf("%w: %w", session.AudioUnavailable, err)
 		}
 		return contentFailure(id, err)
@@ -357,8 +358,8 @@ func (mixer *Mixer) advanceStreams(frame Frame, paused bool) error {
 		if freeze {
 			continue
 		}
-		if !mixer.native.updateStream(item.stream) {
-			return fmt.Errorf("%w: %s: stream update", session.AudioUnavailable, id)
+		if err := mixer.native.updateStream(item.stream); err != nil {
+			return fmt.Errorf("%s: stream update: %w", id, err)
 		}
 		position := float64(mixer.native.streamTime(item.stream))
 		if math.IsNaN(position) || math.IsInf(position, 0) || position < 0 {
