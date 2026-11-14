@@ -6,6 +6,7 @@ package render
 import (
 	"context"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -296,5 +297,325 @@ func TestTrackedObjectiveAndEmergency(t *testing.T) {
 	data.Emergency = "x"
 	if _, err = ui.Plan(ctx, frameView(t, data)); err == nil {
 		t.Fatal("accepted malformed emergency")
+	}
+}
+
+func TestSaturatedCaptionsWaitForVisibleTime(t *testing.T) {
+	ctx := context.Background()
+	measure := func(text string, size float64) float64 { return float64(utf8.RuneCountInString(text)) * size * .5 }
+	for _, size := range []int{100, 125, 150} {
+		t.Run(strconv.Itoa(size), func(t *testing.T) {
+			ui, _ := interfaceFixture(t)
+			values := settings.Defaults(ctx)
+			values.Interface.TextSize = size
+			if err := ui.SetSettings(ctx, values); err != nil {
+				t.Fatal(err)
+			}
+			cues := []session.TextView{
+				{ID: "CAP-WARN-ENEMY", Direction: "left"},
+				{ID: "CAP-WARN-ENEMY", Direction: "right"},
+				{ID: "CAP-WARN-RANGED", Direction: "left"},
+				{ID: "CAP-WARN-RANGED", Direction: "right"},
+				{ID: "CAP-WARN-HAZARD", Direction: "above"},
+				{ID: "CAP-WARN-CRUSHER", Direction: "near"},
+				{ID: "CAP-WARN-EMERGENCY", Direction: "right"},
+				{ID: "CAP-SOURCE-QUEUE", Direction: "left"},
+				{ID: "CAP-HURT"},
+			}
+			active := frameView(t, session.FrameViewData{State: session.StateActive, World: session.WorldView{Generation: 1}, Texts: cues})
+			empty := frameView(t, session.FrameViewData{State: session.StateActive, World: session.WorldView{Generation: 2}})
+			paused := frameView(t, session.FrameViewData{State: session.StatePause, World: session.WorldView{Generation: 2}})
+			if err := ui.Advance(ctx, active, 0); err != nil {
+				t.Fatal(err)
+			}
+			layout := func(view session.FrameView) {
+				t.Helper()
+				screen, err := ui.Plan(ctx, view)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err = ui.ActiveLayout(ctx, screen, nil, nil, measure); err != nil {
+					t.Fatal(err)
+				}
+			}
+			layout(active)
+			visible := 0
+			for _, cue := range ui.captions {
+				if cue.visible {
+					visible++
+				}
+			}
+			if visible == 0 || visible >= len(cues)-1 {
+				t.Fatalf("expected warning saturation, got %d", visible)
+			}
+			if err := ui.Advance(ctx, paused, time.Minute); err != nil {
+				t.Fatal(err)
+			}
+			if len(ui.captions) != len(cues) {
+				t.Fatal("pause discarded cues")
+			}
+			for _, cue := range ui.captions {
+				if cue.remaining != 6*time.Second {
+					t.Fatal("pause consumed caption time")
+				}
+			}
+			// Session feedback and warnings may already have expired. The UI
+			// retains every cue, labels past warnings, and starts no hidden clock.
+			if err := ui.Advance(ctx, empty, time.Minute); err != nil {
+				t.Fatal(err)
+			}
+			seen := make(map[session.TextView]bool)
+			for round := 0; len(ui.captions) > 0 && round < 30; round++ {
+				screen, err := ui.Plan(ctx, empty)
+				if err != nil || (screen.CaptionPriority > 0 && !strings.HasPrefix(screen.Captions[0], "Ранее: ")) {
+					t.Fatalf("expired warning not identified: %+v %v", screen, err)
+				}
+				layout(empty)
+				for _, cue := range ui.captions {
+					if cue.visible {
+						seen[cue.key] = true
+					} else if cue.remaining != 6*time.Second {
+						t.Fatalf("hidden cue lost time: %+v", cue)
+					}
+				}
+				before := len(ui.captions)
+				if err = ui.Advance(ctx, empty, 5*time.Second); err != nil {
+					t.Fatal(err)
+				}
+				if len(ui.captions) != before {
+					t.Fatal("cue expired before six seconds of presentation")
+				}
+				layout(empty)
+				if err = ui.Advance(ctx, empty, time.Second); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if len(ui.captions) != 0 || len(seen) != len(cues) {
+				t.Fatalf("lost or stuck cues: seen=%d waiting=%+v", len(seen), ui.captions)
+			}
+		})
+	}
+}
+
+func TestStandaloneLayoutRotatesOverflowingWarnings(t *testing.T) {
+	ctx := context.Background()
+	measure := func(text string, size float64) float64 { return float64(utf8.RuneCountInString(text)) * size * .5 }
+	for _, size := range []int{100, 125, 150} {
+		ui, _ := interfaceFixture(t)
+		values := settings.Defaults(ctx)
+		values.Interface.TextSize = size
+		if err := ui.SetSettings(ctx, values); err != nil {
+			t.Fatal(err)
+		}
+		screen := Screen{Captions: []string{"Один", "Два", "Три", "Четыре", "Пять", "Шесть", "Семь", "Восемь"}, CaptionPriority: 8}
+		seen := make(map[string]bool)
+		for phase := range screen.Captions {
+			ui.activePage = phase
+			rows, err := ui.ActiveLayout(ctx, screen, nil, nil, measure)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, row := range rows {
+				seen[row.Text] = true
+			}
+		}
+		if len(seen) != len(screen.Captions) {
+			t.Fatalf("size %d: missing warnings: %v", size, seen)
+		}
+	}
+}
+
+func TestPersistentWarningsRotateWithoutExpiringFeedback(t *testing.T) {
+	ctx := context.Background()
+	ui, _ := interfaceFixture(t)
+	values := settings.Defaults(ctx)
+	values.Interface.TextSize = 150
+	if err := ui.SetSettings(ctx, values); err != nil {
+		t.Fatal(err)
+	}
+	measure := func(text string, size float64) float64 { return float64(utf8.RuneCountInString(text)) * size * .5 }
+	cues := []session.TextView{
+		{ID: "CAP-WARN-ENEMY", Direction: "left"}, {ID: "CAP-WARN-ENEMY", Direction: "right"},
+		{ID: "CAP-WARN-RANGED", Direction: "left"}, {ID: "CAP-WARN-RANGED", Direction: "right"},
+		{ID: "CAP-WARN-HAZARD", Direction: "near"}, {ID: "CAP-WARN-CRUSHER", Direction: "near"},
+		{ID: "CAP-HURT"},
+	}
+	active := frameView(t, session.FrameViewData{State: session.StateActive, World: session.WorldView{Generation: 1}, Texts: cues})
+	if err := ui.Advance(ctx, active, 0); err != nil {
+		t.Fatal(err)
+	}
+	seen := make(map[session.TextView]bool)
+	for round := 0; round < 8; round++ {
+		screen, err := ui.Plan(ctx, active)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = ui.ActiveLayout(ctx, screen, nil, nil, measure); err != nil {
+			t.Fatal(err)
+		}
+		for _, caption := range ui.captions {
+			if caption.visible {
+				seen[caption.key] = true
+			}
+			if caption.key.ID == "CAP-HURT" && caption.remaining != 6*time.Second {
+				t.Fatal("hidden feedback expired under live warnings")
+			}
+		}
+		if err = ui.Advance(ctx, active, 6*time.Second); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, cue := range cues[:len(cues)-1] {
+		if !seen[cue] {
+			t.Fatalf("persistent warning never reached the band: %+v", cue)
+		}
+	}
+	empty := frameView(t, session.FrameViewData{State: session.StateActive, World: session.WorldView{Generation: 1}})
+	if err := ui.Advance(ctx, empty, 0); err != nil {
+		t.Fatal(err)
+	}
+	if len(ui.captions) != 1 || ui.captions[0].key.ID != "CAP-HURT" {
+		t.Fatalf("delivered warnings replayed or feedback lost: %+v", ui.captions)
+	}
+}
+
+func TestNewLiveWarningPreemptsHistoricalBacklog(t *testing.T) {
+	ctx := context.Background()
+	ui, _ := interfaceFixture(t)
+	values := settings.Defaults(ctx)
+	values.Interface.TextSize = 150
+	if err := ui.SetSettings(ctx, values); err != nil {
+		t.Fatal(err)
+	}
+	measure := func(text string, size float64) float64 { return float64(utf8.RuneCountInString(text)) * size * .5 }
+	old := []session.TextView{{ID: "CAP-WARN-ENEMY", Direction: "left"}, {ID: "CAP-WARN-RANGED", Direction: "right"}, {ID: "CAP-WARN-HAZARD", Direction: "near"}, {ID: "CAP-HURT"}}
+	view := func(cues []session.TextView) session.FrameView {
+		return frameView(t, session.FrameViewData{State: session.StateActive, World: session.WorldView{Generation: 1}, Texts: cues})
+	}
+	if err := ui.Advance(ctx, view(old), 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := ui.Advance(ctx, view(nil), time.Second); err != nil {
+		t.Fatal(err)
+	}
+	fresh := session.TextView{ID: "CAP-WARN-CRUSHER", Direction: "above"}
+	if err := ui.Advance(ctx, view([]session.TextView{fresh}), 0); err != nil {
+		t.Fatal(err)
+	}
+	screen, err := ui.Plan(ctx, view([]session.TextView{fresh}))
+	if err != nil || len(screen.captionKeys) == 0 || screen.captionKeys[0] != fresh || strings.HasPrefix(screen.Captions[0], "Ранее: ") {
+		t.Fatalf("live warning was not first: %+v %v", screen, err)
+	}
+	if _, err = ui.ActiveLayout(ctx, screen, nil, nil, measure); err != nil {
+		t.Fatal(err)
+	}
+	for _, caption := range ui.captions {
+		if caption.key == fresh && !caption.visible {
+			t.Fatal("historical warning displaced live danger")
+		}
+	}
+}
+
+func TestLongNoticePagesGetIndependentPresentationTime(t *testing.T) {
+	ctx := context.Background()
+	ui, _ := interfaceFixture(t)
+	values := settings.Defaults(ctx)
+	values.Interface.TextSize = 150
+	if err := ui.SetSettings(ctx, values); err != nil {
+		t.Fatal(err)
+	}
+	text := strings.Repeat("Подробные последствия сохранённого события. ", 80)
+	ui.notices = []notice{{text: text, remaining: 6 * time.Second}}
+	active := frameView(t, session.FrameViewData{State: session.StateActive})
+	paused := frameView(t, session.FrameViewData{State: session.StateLedger})
+	measure := func(text string, size float64) float64 { return float64(utf8.RuneCountInString(text)) * size * .5 }
+	want, err := wrapText(text, 300, func(text string) float64 { return measure(text, 36) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for len(ui.notices) > 0 {
+		screen, planErr := ui.Plan(ctx, active)
+		if planErr != nil {
+			t.Fatal(planErr)
+		}
+		rows, layoutErr := ui.ActiveLayout(ctx, screen, nil, []string{"Зачтено", "Долг"}, measure)
+		if layoutErr != nil {
+			t.Fatal(layoutErr)
+		}
+		if ui.notices[0].pages <= 1 {
+			t.Fatal("long notice did not paginate")
+		}
+		for _, row := range rows {
+			if row.X == 948 && row.Text != "Зачтено" && row.Text != "Долг" {
+				got = append(got, row.Text)
+			}
+		}
+		page := ui.notices[0].page
+		if err = ui.Advance(ctx, paused, time.Minute); err != nil || ui.notices[0].page != page {
+			t.Fatal("pause advanced notice page")
+		}
+		if err = ui.Advance(ctx, active, 6*time.Second); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatal("notice pages lost or duplicated text")
+	}
+}
+
+func TestCommittedNoticesReserveSpaceAtEveryPagePhase(t *testing.T) {
+	ctx := context.Background()
+	measure := func(text string, size float64) float64 { return float64(utf8.RuneCountInString(text)) * size * .5 }
+	for _, size := range []int{100, 125, 150} {
+		for phase := 0; phase < 4; phase++ {
+			ui, _ := interfaceFixture(t)
+			values := settings.Defaults(ctx)
+			values.Interface.TextSize = size
+			if err := ui.SetSettings(ctx, values); err != nil {
+				t.Fatal(err)
+			}
+			ui.activePage = phase
+			deed := ui.campaign.Deeds(ctx)[0]
+			after := session.ProgressView{Credits: 1, Receipts: []session.ReceiptView{{Deed: deed.Deed.ID, Title: deed.Title}}, Consequences: []content.ConsequenceID{deed.Deed.Consequence}}
+			if err := ui.enqueueProgress(ctx, session.ProgressView{}, after); err != nil {
+				t.Fatal(err)
+			}
+			active := frameView(t, session.FrameViewData{State: session.StateActive})
+			paused := frameView(t, session.FrameViewData{State: session.StateLedger})
+			right := []string{"Зачтено", "Долг", strings.Repeat("Очень длинная задача для журнала. ", 80)}
+			for _, heading := range []string{"ЗАЧТЕНО: +1", "ПОСЛЕДСТВИЯ"} {
+				screen, err := ui.Plan(ctx, active)
+				if err != nil || !strings.Contains(screen.Notice, heading) {
+					t.Fatalf("size %d phase %d: %+v %v", size, phase, screen, err)
+				}
+				rows, err := ui.ActiveLayout(ctx, screen, nil, right, measure)
+				if err != nil {
+					t.Fatal(err)
+				}
+				want, err := wrapText(screen.Notice, 300, func(text string) float64 { return measure(text, 24*float64(size)/100) })
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, line := range want {
+					found := false
+					for _, row := range rows {
+						found = found || (row.X == 948 && row.Text == line)
+					}
+					if !found {
+						t.Fatalf("size %d phase %d hid notice line %q", size, phase, line)
+					}
+				}
+				if err = ui.Advance(ctx, paused, time.Minute); err != nil || ui.notices[0].remaining != 6*time.Second {
+					t.Fatalf("notice expired in ledger: %v", err)
+				}
+				if err = ui.Advance(ctx, active, 6*time.Second); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if len(ui.notices) != 0 {
+				t.Fatalf("notices remain: %+v", ui.notices)
+			}
+		}
 	}
 }

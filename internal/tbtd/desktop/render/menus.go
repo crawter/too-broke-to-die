@@ -23,33 +23,37 @@ import (
 // or chooses a storage outcome. The owner supplies validated content and the
 // same input sampler used for frame commands.
 type Interface struct {
-	texts            *content.RussianText
-	campaign         *content.Campaign
-	sampler          *input.Sampler
-	values           settings.Values
-	draft            settings.Values
-	settingsDirty    bool
-	settingsPending  bool
-	focus            int
-	detailPage       int
-	activePage       int
-	activeElapsed    time.Duration
-	key              string
-	ledgerTab        int
-	institution      int
-	tracked          content.DeedID
-	section          string
-	returnSection    string
-	settingsTab      int
-	adultSeen        bool
-	armedKey         string
-	armedIndex       int
-	armedAction      settings.Action
-	previous         session.ProgressView
-	initialized      bool
-	lastNotice       string
-	settingsNoticeID session.RequestID
-	notices          []notice
+	texts             *content.RussianText
+	campaign          *content.Campaign
+	sampler           *input.Sampler
+	values            settings.Values
+	draft             settings.Values
+	settingsDirty     bool
+	settingsPending   bool
+	focus             int
+	detailPage        int
+	activePage        int
+	activeElapsed     time.Duration
+	key               string
+	ledgerTab         int
+	institution       int
+	tracked           content.DeedID
+	section           string
+	returnSection     string
+	settingsTab       int
+	adultSeen         bool
+	armedKey          string
+	armedIndex        int
+	armedAction       settings.Action
+	previous          session.ProgressView
+	initialized       bool
+	lastNotice        string
+	settingsNoticeID  session.RequestID
+	notices           []notice
+	captions          []queuedCaption
+	captionSource     map[session.TextView]bool
+	captionGeneration uint64
+	captionState      session.AppState
 }
 
 // NewInterface constructs a display-free interface using concrete in-process
@@ -102,6 +106,7 @@ type Screen struct {
 	Captions  []string
 	// CaptionPriority is the number of leading live warning captions.
 	CaptionPriority int
+	captionKeys     []session.TextView
 }
 
 func (ui *Interface) item(ctx context.Context, id string, action session.MenuAction, target string) (Item, error) {
@@ -121,17 +126,28 @@ func (ui *Interface) Plan(ctx context.Context, view session.FrameView) (_ Screen
 	}
 	var screen Screen
 	if data.State == session.StateActive || data.State == session.StatePause || data.State == session.StateLedger {
-		screen.Boss, screen.Captions, err = ui.hudExtras(ctx, data)
+		screen.Boss, _, err = ui.hudExtras(ctx, data)
 		if err != nil {
 			return Screen{}, err
 		}
 		if ui.values.Interface.SoundCaptions {
-			for _, text := range data.Texts {
-				id := string(text.ID)
-				if strings.HasPrefix(id, "CAP-WARN-") || strings.HasPrefix(id, "CAP-BOSS-") || id == "CAP-SOURCE-QUEUE" || id == "CAP-RELAY-PROTECT" {
-					screen.CaptionPriority++
-				} else if strings.HasPrefix(id, "CAP-") {
-					break
+			// Live warnings precede feedback; expired, undisplayed warnings are
+			// explicitly historical rather than announcing a fictitious attack.
+			for priority := 0; priority < 3; priority++ {
+				for _, caption := range ui.captions {
+					live := caption.warning && ui.captionSource[caption.key]
+					if (priority == 0 && !live) || (priority == 1 && (!caption.warning || live)) || (priority == 2 && caption.warning) {
+						continue
+					}
+					text := caption.text
+					if caption.warning && !live {
+						text = "Ранее: " + text
+					}
+					screen.Captions = append(screen.Captions, text)
+					screen.captionKeys = append(screen.captionKeys, caption.key)
+					if caption.warning {
+						screen.CaptionPriority++
+					}
 				}
 			}
 		}
@@ -596,6 +612,103 @@ func (ui *Interface) Activate(screen Screen) (session.MenuSelection, bool) {
 type notice struct {
 	text      string
 	remaining time.Duration
+	page      int
+	pages     int
+	size      int
+}
+
+type queuedCaption struct {
+	key       session.TextView
+	text      string
+	warning   bool
+	remaining time.Duration
+	page      int
+	pages     int
+	size      int
+	visible   bool
+	delivered bool
+}
+
+func warningCaption(id string) bool {
+	return strings.HasPrefix(id, "CAP-WARN-") || strings.HasPrefix(id, "CAP-BOSS-") || id == "CAP-SOURCE-QUEUE" || id == "CAP-RELAY-PROTECT"
+}
+
+// advanceCaptions copies cues out of the session's short-lived view. Timers
+// start only after a complete page was laid out, and stop for every overlay.
+func (ui *Interface) advanceCaptions(ctx context.Context, data session.FrameViewData, elapsed time.Duration) (err error) {
+	defer mon.Task()(&ctx)(&err)
+	if !ui.values.Interface.SoundCaptions {
+		ui.captions, ui.captionSource = nil, nil
+		ui.captionState = data.State
+		return nil
+	}
+	if data.World.Generation != 0 && ui.captionGeneration != data.World.Generation {
+		// A reconstructed world ends live warnings but must not discard an
+		// undisplayed cue from the interrupted world.
+		ui.captionSource = nil
+		ui.captionGeneration = data.World.Generation
+	}
+	current := ui.captionSource
+	if data.State == session.StateActive || data.State == session.StatePause || data.State == session.StateLedger {
+		current = make(map[session.TextView]bool)
+		for _, item := range data.Texts {
+			id := string(item.ID)
+			if !strings.HasPrefix(id, "CAP-") {
+				continue
+			}
+			current[item] = true
+			if ui.captionSource[item] {
+				continue
+			}
+			found := false
+			for _, caption := range ui.captions {
+				if caption.key == item {
+					found = true
+					break
+				}
+			}
+			if found {
+				continue
+			}
+			_, texts, textErr := ui.hudExtras(ctx, session.FrameViewData{Texts: []session.TextView{item}})
+			if textErr != nil {
+				return textErr
+			}
+			if len(texts) == 1 {
+				ui.captions = append(ui.captions, queuedCaption{key: item, text: texts[0], warning: warningCaption(id), remaining: 6 * time.Second})
+			}
+		}
+	}
+	ui.captionSource = current
+	var waiting, rotated []queuedCaption
+	for _, caption := range ui.captions {
+		if caption.visible && data.State == session.StateActive && ui.captionState == session.StateActive {
+			caption.remaining -= min(elapsed, caption.remaining)
+		}
+		caption.visible = false
+		if caption.warning && caption.delivered && !current[caption.key] {
+			continue
+		}
+		if caption.remaining > 0 {
+			waiting = append(waiting, caption)
+			continue
+		}
+		if caption.page+1 < caption.pages {
+			caption.page++
+			caption.remaining = 6 * time.Second
+			waiting = append(waiting, caption)
+		} else if caption.warning && current[caption.key] {
+			// A persistent warning yields to other warnings after a readable
+			// interval, then is shown again while its source remains live.
+			caption.page = 0
+			caption.remaining = 6 * time.Second
+			caption.delivered = true
+			rotated = append(rotated, caption)
+		}
+	}
+	ui.captions = append(waiting, rotated...)
+	ui.captionState = data.State
+	return nil
 }
 
 // Advance admits notices only for newly acknowledged revisions. Restoration
@@ -606,6 +719,12 @@ func (ui *Interface) Advance(ctx context.Context, view session.FrameView, elapse
 		return content.ErrInvalid.New("invalid notice timing")
 	}
 	data := view.Data(ctx)
+	if ui.initialized && ui.previous.Campaign != data.Progress.Campaign {
+		ui.captions, ui.captionSource = nil, nil
+	}
+	if err = ui.advanceCaptions(ctx, data, elapsed); err != nil {
+		return err
+	}
 	if data.State == session.StateActive {
 		// Overflowing HUD panels cycle without changing gameplay or text size.
 		ui.activeElapsed += elapsed % (6 * time.Second)
@@ -618,7 +737,12 @@ func (ui *Interface) Advance(ctx context.Context, view session.FrameView, elapse
 	if data.State == session.StateActive && len(ui.notices) > 0 {
 		ui.notices[0].remaining -= elapsed
 		if ui.notices[0].remaining <= 0 {
-			ui.notices = ui.notices[1:]
+			if ui.notices[0].page+1 < ui.notices[0].pages {
+				ui.notices[0].page++
+				ui.notices[0].remaining = 6 * time.Second
+			} else {
+				ui.notices = ui.notices[1:]
+			}
 		}
 	}
 	acknowledged := false
@@ -1004,23 +1128,72 @@ func (ui *Interface) ActiveLayout(ctx context.Context, screen Screen, left, righ
 	if screen.CaptionPriority < 0 || screen.CaptionPriority > len(screen.Captions) {
 		return nil, content.ErrInvalid.New("invalid caption priority")
 	}
-	warnings, err := wrap(screen.Captions[:screen.CaptionPriority], 560)
-	if err != nil {
-		return nil, err
-	}
-	captions, err := wrap(screen.Captions[screen.CaptionPriority:], 560)
-	if err != nil {
-		return nil, err
+	if len(screen.captionKeys) == len(screen.Captions) {
+		for i := range ui.captions {
+			ui.captions[i].visible = false
+		}
 	}
 	captionCap := min(6, int(216/step))
-	warningCount := min(len(warnings), captionCap)
-	captionCount := warningCount + min(len(captions), captionCap-warningCount)
+	// Standalone layout callers do not supply the interface's admission
+	// queue. Rotate their overflowing warnings rather than truncating the tail.
+	indices := make([]int, 0, len(screen.Captions))
+	startWarning := 0
+	if len(screen.captionKeys) != len(screen.Captions) && screen.CaptionPriority > 0 {
+		warningLines, wrapErr := wrap(screen.Captions[:screen.CaptionPriority], 560)
+		if wrapErr != nil {
+			return nil, wrapErr
+		}
+		if len(warningLines) > captionCap {
+			startWarning = ui.activePage % screen.CaptionPriority
+		}
+	}
+	for i := 0; i < screen.CaptionPriority; i++ {
+		indices = append(indices, (startWarning+i)%screen.CaptionPriority)
+	}
+	for i := screen.CaptionPriority; i < len(screen.Captions); i++ {
+		indices = append(indices, i)
+	}
+	var captionLines []string
+	for _, index := range indices {
+		lines, wrapErr := wrap([]string{screen.Captions[index]}, 560)
+		if wrapErr != nil {
+			return nil, wrapErr
+		}
+		var queued *queuedCaption
+		if len(screen.captionKeys) == len(screen.Captions) {
+			for i := range ui.captions {
+				if ui.captions[i].key == screen.captionKeys[index] {
+					queued = &ui.captions[i]
+					break
+				}
+			}
+		}
+		pages := max(1, (len(lines)+captionCap-1)/captionCap)
+		page := ui.activePage % pages
+		if queued != nil {
+			if queued.size != ui.values.Interface.TextSize || queued.pages != pages {
+				queued.page, queued.remaining = 0, 6*time.Second
+				queued.size, queued.pages = ui.values.Interface.TextSize, pages
+			}
+			page = queued.page
+		}
+		start := page * captionCap
+		part := lines[start:min(len(lines), start+captionCap)]
+		if len(part) > captionCap-len(captionLines) {
+			// Keep the entire cue waiting; a partly displayed cue must not
+			// start its clock or displace an earlier warning.
+			break
+		}
+		captionLines = append(captionLines, part...)
+		if queued != nil {
+			queued.visible = true
+		}
+	}
+	captionCount := len(captionLines)
 	captionY := 696 - float64(captionCount)*step
-	// Never let a cycling feedback page displace a current danger warning.
-	for i, line := range warnings[:warningCount] {
+	for i, line := range captionLines {
 		rows = append(rows, LayoutRow{Text: line, X: 360, Y: captionY + float64(i)*step, Width: 560, ItemIndex: -1})
 	}
-	addPage(captions, 360, captionY+float64(warningCount)*step, 560, captionCap-warningCount)
 	warning, err := wrap([]string{screen.Emergency}, 560)
 	if err != nil {
 		return nil, err
@@ -1048,22 +1221,50 @@ func (ui *Interface) ActiveLayout(ctx context.Context, screen Screen, left, righ
 	if err != nil {
 		return nil, err
 	}
-	rightLines, err := wrap(append(append([]string(nil), right...), screen.Notice), 300)
+	rightLines, err := wrap(right, 300)
 	if err != nil {
 		return nil, err
 	}
 	capacity := int((696 - 24) / step)
-	addSide := func(lines []string, x, width float64) {
+	var noticeLines []string
+	if screen.Notice != "" {
+		noticeLines, err = wrap([]string{screen.Notice}, 300)
+		if err != nil {
+			return nil, err
+		}
+		// Reserve the lower right panel for the notice independently of the
+		// objective's global page. Long notices have their own six-second pages.
+		noticeCap := capacity - min(2, len(rightLines))
+		if noticeCap <= 0 {
+			return nil, content.ErrInvalid.New("notice leaves no room in active panel")
+		}
+		pages := max(1, (len(noticeLines)+noticeCap-1)/noticeCap)
+		page := 0
+		if len(ui.notices) > 0 && ui.notices[0].text == screen.Notice {
+			notice := &ui.notices[0]
+			if notice.size != ui.values.Interface.TextSize || notice.pages != pages {
+				notice.page, notice.remaining = 0, 6*time.Second
+				notice.size, notice.pages = ui.values.Interface.TextSize, pages
+			}
+			page = notice.page
+		}
+		start := page * noticeCap
+		noticeLines = noticeLines[start:min(len(noticeLines), start+noticeCap)]
+	}
+	addSide := func(lines []string, x, width float64, available int) {
 		// Health and credit/debt remain visible even when supporting details
 		// need several pages at the largest text size.
-		pinned := min(2, len(lines), capacity)
+		pinned := min(2, len(lines), available)
 		for i, line := range lines[:pinned] {
 			rows = append(rows, LayoutRow{Text: line, X: x, Y: 24 + float64(i)*step, Width: width, ItemIndex: -1})
 		}
-		addPage(lines[pinned:], x, 24+float64(pinned)*step, width, capacity-pinned)
+		addPage(lines[pinned:], x, 24+float64(pinned)*step, width, available-pinned)
 	}
-	addSide(leftLines, 28, 270)
-	addSide(rightLines, 948, 300)
+	addSide(leftLines, 28, 270, capacity)
+	addSide(rightLines, 948, 300, capacity-len(noticeLines))
+	for i, line := range noticeLines {
+		rows = append(rows, LayoutRow{Text: line, X: 948, Y: 24 + float64(capacity-len(noticeLines)+i)*step, Width: 300, ItemIndex: -1})
+	}
 	return rows, nil
 }
 
