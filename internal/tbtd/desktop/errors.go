@@ -15,6 +15,7 @@ import (
 	monkit "github.com/spacemonkeygo/monkit/v3"
 
 	"too-broke-to-die/internal/tbtd/content"
+	"too-broke-to-die/internal/tbtd/desktop/render"
 	"too-broke-to-die/internal/tbtd/session"
 )
 
@@ -24,54 +25,10 @@ var diagnosticIDPattern = regexp.MustCompile(`^[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)+$`)
 
 // ErrorPresentation contains only safe player-facing information. Choices are
 // semantic actions, not permission to bypass the session's recovery policy.
-type ErrorPresentation struct {
-	Code    session.ErrorCode
-	Message string
-	Choices []string
-}
+type ErrorPresentation = render.ErrorPresentation
 
-// PresentError classifies by identity, never by an underlying error's text.
-// A nil error produces no presentation. Storage choices must still be limited
-// to the choices actually supplied by the session.
-func PresentError(err error) ErrorPresentation {
-	if err == nil {
-		return ErrorPresentation{}
-	}
-	code := session.Internal
-	for _, candidate := range []session.ErrorCode{session.InvalidAction, session.ContentInvalid, session.StorageDenied, session.StorageFull, session.StorageConflict, session.SaveCorrupt, session.SaveTooNew, session.ContentIncompatible, session.GraphicsUnavailable, session.AudioUnavailable, session.Internal} {
-		if errors.Is(err, candidate) {
-			code = candidate
-			break
-		}
-	}
-	if code == session.Internal && (content.ErrInvalid.Has(err) || errors.Is(err, content.ErrMissingReference) || content.Error.Has(err)) {
-		code = session.ContentInvalid
-	}
-	result := ErrorPresentation{Code: code}
-	switch code {
-	case session.InvalidAction:
-		result.Message = "Действие сейчас недоступно."
-	case session.ContentInvalid:
-		result.Message, result.Choices = "Не удалось загрузить необходимые материалы игры. Проверьте файлы игры.", []string{"retry", "exit"}
-	case session.StorageDenied:
-		result.Message, result.Choices = "Нет доступа к сохранению или профиль занят.", []string{"retry_save", "reload_saved", "exit_unsaved"}
-	case session.StorageFull:
-		result.Message, result.Choices = "Недостаточно места для сохранения.", []string{"retry_save", "reload_saved", "exit_unsaved"}
-	case session.StorageConflict:
-		result.Message, result.Choices = "Сохранение изменилось. Необходимо заново загрузить прогресс.", []string{"reload_saved", "exit_unsaved"}
-	case session.SaveCorrupt:
-		result.Message, result.Choices = "Не удалось прочитать сохранение. Повреждённые файлы сохранены.", []string{"choose_older", "new_game", "exit"}
-	case session.SaveTooNew, session.ContentIncompatible:
-		result.Message, result.Choices = "Сохранение несовместимо с этой версией игры. Файлы сохранены.", []string{"new_game", "exit"}
-	case session.GraphicsUnavailable:
-		result.Message, result.Choices = "Графическое устройство недоступно. Прогресс сохранён в последней подтверждённой версии.", []string{"exit"}
-	case session.AudioUnavailable:
-		result.Message, result.Choices = "Звук недоступен. Можно продолжить без звука или повторить попытку.", []string{"continue_silent", "retry_audio"}
-	default:
-		result.Message, result.Choices = "Произошла внутренняя ошибка. Загрузите сохранённый прогресс или выйдите.", []string{"reload_saved", "exit_unsaved"}
-	}
-	return result
-}
+// PresentError classifies by identity without exposing underlying errors.
+func PresentError(err error) ErrorPresentation { return render.PresentError(err) }
 
 // PresentContentError attaches a separately supplied inventory identity, never
 // a path or an error string. The caller supplies its validated manifest.
