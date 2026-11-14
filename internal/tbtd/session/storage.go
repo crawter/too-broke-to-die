@@ -35,6 +35,9 @@ type OperationID struct {
 type ProgressKind string
 
 const (
+	// InspectActive reads the selected revision without resolving or changing it.
+	InspectActive ProgressKind = "inspect_active"
+
 	// LoadActive loads the campaign selected by the active profile selector.
 	LoadActive ProgressKind = "load_active"
 
@@ -96,7 +99,7 @@ func NewProgressRequest(ctx context.Context, input ProgressInput) (_ ProgressReq
 		return ProgressRequest{}, fmt.Errorf("%w: missing request identity", InvalidAction)
 	}
 	switch input.Kind {
-	case LoadActive:
+	case LoadActive, InspectActive:
 		if input.Campaign != "" || input.Operation != (OperationID{}) || input.ExpectedRevision != 0 {
 			return ProgressRequest{}, fmt.Errorf("%w: active load identity", InvalidAction)
 		}
@@ -209,6 +212,9 @@ type ProgressResultData struct {
 	Snapshot campaign.Snapshot
 
 	Candidates []RecoveryCandidate
+
+	// BothRevisionsInvalid is set only after inspecting two corrupt slots.
+	BothRevisionsInvalid bool
 }
 
 // ProgressResult owns its recovery choices.

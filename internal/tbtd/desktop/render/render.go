@@ -26,23 +26,26 @@ var mon = monkit.Package()
 // Renderer borrows cache resources; its owner must keep the OS thread locked
 // and the cache alive until Close. Draw does not begin or end the window frame.
 type Renderer struct {
-	cache      *assets.Cache
-	thread     assets.ThreadID
-	owner      uint64
-	camera     Camera
-	effects    effectPool
-	room       content.EncounterID
-	generation uint64
-	closed     bool
+	cache       *assets.Cache
+	thread      assets.ThreadID
+	owner       uint64
+	camera      Camera
+	effects     effectPool
+	room        content.EncounterID
+	generation  uint64
+	closed      bool
+	interfaceUI *Interface
 }
 
-// New constructs a renderer without allocating native resources.
-func New(ctx context.Context, cache *assets.Cache, thread assets.ThreadID) (_ *Renderer, err error) {
+// New constructs a renderer without allocating native resources. Exactly one
+// interface is required; the checked variadic preserves existing callers while
+// rejecting construction before the dependency is supplied.
+func New(ctx context.Context, cache *assets.Cache, thread assets.ThreadID, interfaces ...*Interface) (_ *Renderer, err error) {
 	defer mon.Task()(&ctx)(&err)
-	if cache == nil || thread == nil || thread() == 0 {
-		return nil, content.ErrInvalid.New("missing renderer cache or thread")
+	if cache == nil || thread == nil || thread() == 0 || len(interfaces) != 1 || interfaces[0] == nil {
+		return nil, content.ErrInvalid.New("missing renderer cache, thread or interface")
 	}
-	return &Renderer{cache: cache, thread: thread, owner: thread()}, nil
+	return &Renderer{cache: cache, thread: thread, owner: thread(), interfaceUI: interfaces[0]}, nil
 }
 
 // Close drops borrowed references; it never unloads cache-owned handles.
@@ -82,6 +85,24 @@ func (renderer *Renderer) Draw(ctx context.Context, view session.FrameView, widt
 		return input.Viewport{}, content.ErrInvalid.New("invalid viewport")
 	}
 	data := view.Data(ctx)
+	if renderer.interfaceUI == nil {
+		return input.Viewport{}, content.ErrInvalid.New("missing interface presentation")
+	}
+	if err = renderer.interfaceUI.Advance(ctx, view, elapsed); err != nil {
+		return input.Viewport{}, err
+	}
+	// Recovery must remain usable even when the world or an asset failed to
+	// load. It needs only the already validated emergency UI font.
+	if data.State == session.StateActive && data.World.Background == "" {
+		return input.Viewport{}, content.ErrInvalid.New("world: missing background")
+	}
+	if interfaceOnly(data) {
+		viewport := renderer.camera.Viewport(width, height)
+		if err = renderer.drawInterface(ctx, view, viewport); err != nil {
+			return viewport, err
+		}
+		return viewport, nil
+	}
 	items, err := planWorld(ctx, data)
 	if err != nil {
 		return input.Viewport{}, err
@@ -255,7 +276,15 @@ func (renderer *Renderer) Draw(ctx context.Context, view session.FrameView, widt
 	if point, ok := reticlePoint(viewport, data.Aim, position); ok {
 		drawReticle(point, float32(viewport.Width/LogicalWidth))
 	}
+	if err = renderer.drawInterface(ctx, view, viewport); err != nil {
+		return viewport, err
+	}
 	return viewport, nil
+}
+
+// interfaceOnly keeps recovery independent of damaged or unavailable world art.
+func interfaceOnly(data session.FrameViewData) bool {
+	return data.State == session.StateError || data.World.Background == ""
 }
 
 // enterWorld drops camera and decorative state after any reconstruction, even

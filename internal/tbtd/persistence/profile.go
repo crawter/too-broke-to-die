@@ -82,6 +82,12 @@ func (store *Store) processProgress(ctx context.Context, input session.ProgressI
 	}
 	var err error
 	switch input.Kind {
+	case session.InspectActive:
+		var id session.CampaignID
+		id, err = store.active(ctx)
+		if err == nil {
+			result, err = store.inspectCampaign(ctx, id)
+		}
 	case session.LoadActive:
 		if store.selectorPending != nil {
 			err = store.finishSelector(ctx, store.selectorPending)

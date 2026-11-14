@@ -142,12 +142,22 @@ func (service *Service) selectAction(ctx context.Context, selection MenuSelectio
 			return fmt.Errorf("%w: confirmation required", InvalidAction)
 		}
 	}
-	if state == StateSaving || state == StateRestoring || (state == StateTitle && service.pending != nil) {
+	if state == StateSaving || state == StateRestoring || (state == StateTitle && service.pending != nil && selection.Action != "exit_game") {
 		// Storage and restoration keep processing window events but do not
 		// accept a second gameplay or storage operation.
 		return nil
 	}
 	switch selection.Action {
+	case "exit_game":
+		if state != StateTitle {
+			return fmt.Errorf("%w: exit from title", InvalidAction)
+		}
+		service.exit = true
+		return nil
+	case "open_ledger":
+		return service.policy.Transition(ctx, OpenLedger, "")
+	case "close_ledger":
+		return service.policy.Transition(ctx, CloseLedger, "")
 	case "continue":
 		if err = service.policy.Transition(ctx, ContinueGame, ""); err != nil {
 			return err

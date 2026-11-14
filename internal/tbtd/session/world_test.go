@@ -32,6 +32,9 @@ func TestWorldViewPublishesAuthoritativePreviewAndCopies(t *testing.T) {
 	if data.World.Background != "ART-PRO-01" || data.World.Tick != current.Tick || len(data.World.Terrain) == 0 {
 		t.Fatalf("world view: %+v", data.World)
 	}
+	if data.Progress.Anchor != "ANC-PRO-01" {
+		t.Fatalf("restored default anchor: %s", data.Progress.Anchor)
+	}
 	preview, err := service.world.PreviewThrow(ctx, simulation.Vector{}, nil)
 	if err != nil || len(preview.Points) != len(data.Aim.Trajectory) || !data.Aim.Visible {
 		t.Fatalf("preview: %+v %v", data.Aim, err)
@@ -46,6 +49,163 @@ func TestWorldViewPublishesAuthoritativePreviewAndCopies(t *testing.T) {
 	again := view.Data(ctx)
 	if again.World.Terrain[0].X == -999 || again.Aim.Trajectory[0].X == -999 {
 		t.Fatal("view exposes mutable world data")
+	}
+}
+
+func TestMenuLedgerAndTitleExitSelections(t *testing.T) {
+	service, store := sessionFixture(t)
+	loadFixture(t, service, store, campaign.Snapshot{})
+	frame(t, service, FrameInput{Edges: []ActionEdge{{Action: settings.Pause, Kind: Pressed}}})
+	view := choose(t, service, "open_ledger", "")
+	if view.State != StateLedger {
+		t.Fatalf("open ledger: %s", view.State)
+	}
+	view = choose(t, service, "close_ledger", "")
+	if view.State != StatePause {
+		t.Fatalf("close ledger: %s", view.State)
+	}
+	service2, _ := sessionFixture(t)
+	view = choose(t, service2, "exit_game", "")
+	if !view.ExitRequested || view.State != StateTitle {
+		t.Fatalf("exit: %+v", view)
+	}
+}
+
+func TestRestorationReadyIsPublishedUntilResume(t *testing.T) {
+	service, store := sessionFixture(t)
+	choose(t, service, "continue", "")
+	request := store.last()
+	store.reply(ProgressResultData{ID: request.ID, Campaign: testID, Status: StorageSucceeded, Revision: 7, RevisionKnown: true, PayloadDigest: oldDigest, Snapshot: campaign.Snapshot{}})
+	view := frame(t, service, FrameInput{})
+	if view.State != StatePause || !view.RestorationReady {
+		t.Fatalf("restoration pause: %+v", view)
+	}
+	view = choose(t, service, "resume", "")
+	if view.State != StateActive || view.RestorationReady {
+		t.Fatalf("resume retained restoration prompt: %+v", view)
+	}
+}
+
+func TestLiveServiceAndEmergencyPublication(t *testing.T) {
+	ctx := context.Background()
+	service, store := sessionFixture(t)
+	active, _ := preparedCertification(t)
+	loadFixture(t, service, store, active)
+	view, err := service.view(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := view.Data(ctx)
+	if data.Tracked != "D-HOS-SUP-01" || data.ServiceStatus != "active" || data.ObjectiveID != "TXT-ACT-SUP-PAD" {
+		t.Fatalf("active objective: %+v", data)
+	}
+	jumped := false
+	for tick := 0; tick < 1000; tick++ {
+		_, world := service.world.Snapshot(ctx).Data(ctx)
+		enemy := service.world.CombatView(ctx).Enemies[0]
+		if enemy.Body.Bounds.X-world.Player.Bounds.X < 70 && world.Player.Bounds.Y == 0 {
+			break
+		}
+		player := simulation.PlayerCommand{Move: 1}
+		if !jumped && world.Player.Bounds.X >= 240 {
+			player.Edges = []simulation.PlayerEdge{{Action: settings.Jump, Pressed: true}}
+			jumped = true
+		}
+		simulationServiceTick(t, service, player, nil)
+	}
+	for tick := 0; tick < 500; tick++ {
+		enemies := service.world.CombatView(ctx).Enemies
+		if len(enemies) != 1 || enemies[0].Health == 0 {
+			break
+		}
+		_, world := service.world.Snapshot(ctx).Data(ctx)
+		distance := enemies[0].Body.Bounds.X - world.Player.Bounds.X
+		player := simulation.PlayerCommand{Aim: simulation.Vector{X: 1}}
+		if distance < 0 {
+			player.Aim.X = -1
+		}
+		if distance > 65 {
+			player.Move = 1
+		} else if distance < -65 {
+			player.Move = -1
+		} else if service.world.PlayerStatus().Action == simulation.FreeAction {
+			player.Edges = []simulation.PlayerEdge{{Action: settings.Melee}, {Action: settings.Melee, Pressed: true}}
+		}
+		simulationServiceTick(t, service, player, nil)
+	}
+	jumped = false
+	for tick := 0; tick < 1000; tick++ {
+		_, world := service.world.Snapshot(ctx).Data(ctx)
+		if world.Player.Bounds.X < 240 {
+			break
+		}
+		player := simulation.PlayerCommand{Move: -1}
+		if !jumped && world.Player.Bounds.X < 450 {
+			player.Edges = []simulation.PlayerEdge{{Action: settings.Jump}, {Action: settings.Jump, Pressed: true}}
+			jumped = true
+		}
+		simulationServiceTick(t, service, player, nil)
+	}
+	for tick := 0; tick < 2200 && service.world.ServiceView(ctx).Status != simulation.ServiceEvidenceReady; tick++ {
+		simulationServiceTick(t, service, simulation.PlayerCommand{Move: 1}, nil)
+	}
+	view, err = service.view(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = view.Data(ctx)
+	if data.Tracked != "D-HOS-SUP-01" || data.ServiceStatus != "evidence_ready" || data.ObjectiveID != "TXT-EVD-READY" {
+		t.Fatalf("evidence-ready objective: %+v", data)
+	}
+	data = frame(t, service, FrameInput{Edges: []ActionEdge{{Action: settings.Ledger, Kind: Pressed}}})
+	if data.State != StateLedger || len(data.Tickets) != 100 {
+		t.Fatalf("ledger eligibility publication: %s %d", data.State, len(data.Tickets))
+	}
+	if data.Tickets[0].Deed != data.Tracked || data.Tickets[0].Status != "evidence_ready" {
+		t.Fatalf("evidence-ready ticket: %+v", data.Tickets[0])
+	}
+	service2, store2 := sessionFixture(t)
+	progress, err := service2.campaign.Start(ctx, campaign.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range service2.manifest.Batches(ctx)[0].Deeds {
+		progress = certifyAuthored(t, service2, progress, id)
+	}
+	loadFixture(t, service2, store2, progress)
+	view, err = service2.view(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = view.Data(ctx)
+	if data.Emergency != "EM-HOS-SUP" || !data.EmergencyWarning {
+		t.Fatalf("emergency warning: %+v", data)
+	}
+	found := false
+	for _, marker := range data.World.Markers {
+		if marker.ID == "EM-HOS-SUP" && marker.State == "warning" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("emergency warning boundary missing")
+	}
+}
+
+func TestServiceObjectivePresentationIdentity(t *testing.T) {
+	for _, test := range []struct {
+		view simulation.ServiceView
+		want content.PresentationID
+	}{
+		{simulation.ServiceView{Objective: "weight the plate and latch the gate"}, "TXT-ACT-RES-GATE"},
+		{simulation.ServiceView{Objective: "start the evidence recorder"}, "TXT-ACT-PRV-RECORDER"},
+		{simulation.ServiceView{Status: simulation.ServicePending}, "TXT-SAVE-PENDING"},
+		{simulation.ServiceView{Status: simulation.ServiceFailed}, "TXT-LED-RESET"},
+		{simulation.ServiceView{Objective: "unrecognized"}, ""},
+	} {
+		if got := serviceObjectiveID(test.view); got != test.want {
+			t.Fatalf("%+v: got %s, want %s", test.view, got, test.want)
+		}
 	}
 }
 
@@ -368,6 +528,9 @@ func TestAcceptedDamageProducesIsolatedEffectEvent(t *testing.T) {
 	data := view.Data(ctx)
 	if len(data.World.Effects) != 1 || data.World.Effects[0].Kind != "hit" || data.World.Effects[0].Asset != "FX-BODY" || data.World.Effects[0].Entity != "player" || data.World.Effects[0].Direction != 1 {
 		t.Fatalf("accepted damage event: %+v", data.World.Effects)
+	}
+	if len(data.Texts) != 1 || data.Texts[0].ID != "CAP-HURT" {
+		t.Fatalf("accepted damage caption: %+v", data.Texts)
 	}
 	data.World.Effects[0].Entity = "mutated"
 	if view.Data(ctx).World.Effects[0].Entity != "player" {
