@@ -13,11 +13,16 @@ import (
 	"sync"
 	"time"
 
+	rl "github.com/gen2brain/raylib-go/raylib"
 	monkit "github.com/spacemonkeygo/monkit/v3"
 	"github.com/zeebo/errs"
 
 	"too-broke-to-die/internal/tbtd/campaign"
 	"too-broke-to-die/internal/tbtd/content"
+	"too-broke-to-die/internal/tbtd/desktop/assets"
+	"too-broke-to-die/internal/tbtd/desktop/audio"
+	"too-broke-to-die/internal/tbtd/desktop/input"
+	"too-broke-to-die/internal/tbtd/desktop/render"
 	"too-broke-to-die/internal/tbtd/diagnostics"
 	"too-broke-to-die/internal/tbtd/persistence"
 	"too-broke-to-die/internal/tbtd/platform"
@@ -25,48 +30,192 @@ import (
 	"too-broke-to-die/internal/tbtd/settings"
 )
 
-// ErrRuntimeUnavailable means the native desktop loop is not yet wired. It is
-// a startup failure, not an indication that the game or its media are ready.
+// ErrRuntimeUnavailable means the program has no initialized native renderer.
 var ErrRuntimeUnavailable = errors.New("native desktop runtime not yet wired")
 
 // ErrWorkerExited marks a persistence worker that stopped before shutdown.
 var ErrWorkerExited = errors.New("persistence worker exited unexpectedly")
 
-// Program owns the profile writer, local recorder, and their filesystem roots.
-// Native resources are not acquired by this preliminary composition root.
+// Program owns the window, profile writer, local recorder, and filesystem roots.
+// The caller must keep the initial OS thread locked through Run and Close.
 type Program struct {
-	contentRoot  *os.Root
-	profileRoot  *os.Root
-	store        *persistence.Store
-	recorder     *diagnostics.Recorder
-	session      *session.Service
-	windowed     bool
-	reset        bool
-	values       settings.Values
-	mu           sync.Mutex
-	writerDone   chan struct{}
-	writerStop   context.CancelFunc
-	writerErr    error
-	runCancel    context.CancelFunc
-	runDone      chan struct{}
-	runStarted   bool
-	closing      bool
-	shutdown     chan struct{}
-	shutdownOnce sync.Once
-	closeOnce    sync.Once
-	closeErr     error
-	closeRoot    func(*os.Root) error
+	window           windowBoundary
+	ownerThread      uint64
+	manifest         *content.Manifest
+	definitions      *content.Campaign
+	cache            *assets.Cache
+	sampler          *input.Sampler
+	ui               *render.Interface
+	renderer         *render.Renderer
+	mixer            *audio.Mixer
+	contentRoot      *os.Root
+	profileRoot      *os.Root
+	store            *persistence.Store
+	recorder         *diagnostics.Recorder
+	session          *session.Service
+	windowed         bool
+	reset            bool
+	values           settings.Values
+	savedDisplay     settings.Display
+	settingsDraft    *settings.Values
+	settingsPending  session.RequestID
+	settingsSequence uint64
+	mu               sync.Mutex
+	writerDone       chan struct{}
+	writerStop       context.CancelFunc
+	writerErr        error
+	runCancel        context.CancelFunc
+	runDone          chan struct{}
+	runStarted       bool
+	closing          bool
+	closed           bool
+	shutdown         chan struct{}
+	shutdownOnce     sync.Once
+	closeOnce        sync.Once
+	closeErr         error
+	closeRoot        func(*os.Root) error
 }
 
 // New validates authored definitions and acquires the exclusive profile writer.
 // It starts no application worker. Any partial acquisition is rolled back.
 func New(ctx context.Context, config Config) (_ *Program, err error) {
 	defer mon.Task()(&ctx)(&err)
-	return newWithFilesystem(ctx, config, filesystemBoundary{
+	return newWithNative(ctx, config, filesystemBoundary{
 		open:   os.OpenRoot,
 		create: platform.CreateRoot,
 		close:  func(root *os.Root) error { return root.Close() },
-	})
+	}, raylibWindow{})
+}
+
+// newWithNative keeps all native acquisition on the caller's locked thread.
+// The cache and mixer own their handles; the renderer only borrows the cache.
+func newWithNative(ctx context.Context, config Config, files filesystemBoundary, window windowBoundary) (_ *Program, err error) {
+	defer mon.Task()(&ctx)(&err)
+	program, err := newWithWindow(ctx, config, files, window)
+	if err != nil {
+		return nil, err
+	}
+	program.ownerThread = nativeThreadID()
+	defer func() {
+		if err != nil {
+			err = errs.Combine(err, program.Close())
+		}
+	}()
+	filesystem := program.contentRoot.FS()
+	texts, err := content.LoadRussian(ctx, filesystem, program.definitions)
+	if err != nil {
+		return nil, err
+	}
+	program.cache, err = assets.New(ctx, filesystem, program.manifest, nativeThreadID, nil)
+	if err != nil {
+		return nil, err
+	}
+	values := settings.Defaults(ctx)
+	program.sampler, err = input.New(ctx, values, nativeThreadID)
+	if err != nil {
+		return nil, err
+	}
+	program.ui, err = render.NewInterface(ctx, texts, program.definitions, program.sampler, values)
+	if err != nil {
+		return nil, err
+	}
+	program.renderer, err = render.New(ctx, program.cache, nativeThreadID, program.ui)
+	if err != nil {
+		return nil, err
+	}
+	// AudioUnavailable may return an owned mixer as well as an error.
+	program.mixer, err = audio.New(ctx, filesystem, program.manifest, nativeThreadID, "shared")
+	if err != nil {
+		return nil, err
+	}
+	return program, nil
+}
+
+// windowBoundary is the operating-system window boundary. Its owner calls all
+// methods on the locked initial thread. Open must clean up on failure.
+type windowBoundary interface {
+	Open(context.Context) error
+	Apply(context.Context, settings.Display) error
+	Close(context.Context) error
+}
+
+type raylibWindow struct{}
+
+func (raylibWindow) Open(ctx context.Context) (err error) {
+	defer mon.Task()(&ctx)(&err)
+	if err = ctx.Err(); err != nil {
+		return err
+	}
+	rl.SetConfigFlags(rl.FlagWindowResizable | rl.FlagWindowHighdpi | rl.FlagVsyncHint)
+	rl.InitWindow(1280, 720, "TOO BROKE TO DIE")
+	if !rl.IsWindowReady() {
+		return session.GraphicsUnavailable
+	}
+	rl.SetExitKey(rl.KeyNull)
+	rl.SetTargetFPS(60)
+	return nil
+}
+
+func (raylibWindow) Apply(ctx context.Context, display settings.Display) (err error) {
+	defer mon.Task()(&ctx)(&err)
+	if err = ctx.Err(); err != nil {
+		return err
+	}
+	if !rl.IsWindowReady() {
+		return session.GraphicsUnavailable
+	}
+	if display.Width < 1280 || display.Height < 720 || display.Width > 16384 || display.Height > 16384 {
+		return settings.ErrInvalid
+	}
+	if display.Mode != settings.Windowed && display.Mode != settings.Borderless && display.Mode != settings.Fullscreen {
+		return settings.ErrInvalid
+	}
+	if rl.IsWindowFullscreen() {
+		rl.ToggleFullscreen()
+	}
+	if rl.IsWindowState(rl.FlagBorderlessWindowedMode) {
+		rl.ToggleBorderlessWindowed()
+	}
+	rl.SetWindowSize(display.Width, display.Height)
+	switch display.Mode {
+	case settings.Borderless:
+		rl.ToggleBorderlessWindowed()
+	case settings.Fullscreen:
+		rl.ToggleFullscreen()
+	}
+	if display.VSync {
+		rl.SetWindowState(rl.FlagVsyncHint)
+	} else {
+		rl.ClearWindowState(rl.FlagVsyncHint)
+	}
+	return nil
+}
+
+func (raylibWindow) Close(ctx context.Context) (err error) {
+	defer mon.Task()(&ctx)(&err)
+	rl.CloseWindow()
+	return nil
+}
+
+func newWithWindow(ctx context.Context, config Config, files filesystemBoundary, window windowBoundary) (_ *Program, err error) {
+	defer mon.Task()(&ctx)(&err)
+	if window == nil {
+		return nil, errors.New("missing window boundary")
+	}
+	program, err := newWithFilesystem(ctx, config, files)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err != nil {
+			err = errs.Combine(err, program.Close())
+		}
+	}()
+	if err = window.Open(ctx); err != nil {
+		return nil, fmt.Errorf("open window: %w", err)
+	}
+	program.window = window
+	return program, nil
 }
 
 // filesystemBoundary isolates the owned directory operations from the native
@@ -113,6 +262,7 @@ func newWithFilesystem(ctx context.Context, config Config, files filesystemBound
 	if err != nil {
 		return nil, err
 	}
+	program.manifest, program.definitions = manifest, definitions
 	bays, err := content.LoadServiceBays(ctx, filesystem, "content/data/encounters/templates.json", "content/data/encounters/variants.json", definitions)
 	if err != nil {
 		return nil, err
@@ -166,12 +316,14 @@ func newWithFilesystem(ctx context.Context, config Config, files filesystemBound
 	return program, nil
 }
 
-// Run supervises the persistence worker. Until the native loop is wired it
-// returns ErrRuntimeUnavailable without submitting a campaign transition.
+// Run supervises the persistence worker while frames run on the owning thread.
 func (program *Program) Run(ctx context.Context) (err error) {
 	defer mon.Task()(&ctx)(&err)
 	if err = ctx.Err(); err != nil {
 		return err
+	}
+	if program.ownerThread != 0 && nativeThreadID() != program.ownerThread {
+		return assets.ErrThread
 	}
 	program.mu.Lock()
 	if program.runStarted || program.closing || program.store == nil {
@@ -190,11 +342,213 @@ func (program *Program) Run(ctx context.Context) (err error) {
 	defer cancelLoop()
 
 	loopErr := program.loadSettings(loopCtx, done)
-	if loopErr == nil {
-		// Native frame processing must run here on the calling, locked OS thread.
+	if loopErr == nil && program.window != nil {
+		loopErr = program.window.Apply(loopCtx, program.values.Display)
+	}
+	if loopErr == nil && program.renderer != nil {
+		loopErr = program.sampler.SetBindings(loopCtx, program.values)
+		if loopErr == nil {
+			loopErr = program.ui.SetSettings(loopCtx, program.values)
+		}
+		if loopErr == nil {
+			loopErr = program.runFrames(loopCtx)
+		}
+	} else if loopErr == nil {
 		loopErr = ErrRuntimeUnavailable
 	}
 	return program.finishRun(ctx, loopErr, stop, done)
+}
+
+// runFrames stays on the thread that constructed the native resources. The
+// session owns pause, saving and close confirmation; no proposed progress is
+// published by this adapter.
+func (program *Program) runFrames(ctx context.Context) (err error) {
+	defer mon.Task()(&ctx)(&err)
+	var view session.FrameView
+	var haveView, closeSeen bool
+	var viewport input.Viewport
+	group := "shared"
+	last := time.Now()
+	targetFPS := int32(60)
+	for {
+		if err = ctx.Err(); err != nil {
+			return err
+		}
+		started := time.Now()
+		elapsed := started.Sub(last)
+		last = started
+		rl.PollInputEvents()
+		closeNow := rl.WindowShouldClose()
+		closeRequest := closeNow && !closeSeen
+		closeSeen = closeNow
+		width, height := rl.GetScreenWidth(), rl.GetScreenHeight()
+		if width <= 0 || height <= 0 {
+			return session.GraphicsUnavailable
+		}
+		geometry := (render.Camera{}).Viewport(width, height)
+		geometry.Target = viewport.Target
+		if viewport.Zoom > 0 {
+			geometry.Offset, geometry.Zoom, geometry.Rotation = viewport.Offset, viewport.Zoom, viewport.Rotation
+		}
+		var origin input.Point
+		facing := 1
+		if haveView {
+			for _, entity := range view.Data(ctx).Entities {
+				if entity.ID == "player" {
+					origin, facing = input.Point{X: entity.X, Y: entity.Y}, entity.Facing
+					break
+				}
+			}
+		}
+		command, sampleErr := program.sampler.Sample(ctx, input.Frame{Elapsed: elapsed, View: geometry, ThrowOrigin: origin, Facing: facing, CloseRequested: closeRequest})
+		if sampleErr != nil {
+			return sampleErr
+		}
+		if haveView {
+			font, fontErr := program.cache.Font(ctx, "FONT-NOTO-REGULAR")
+			if fontErr != nil {
+				return fontErr
+			}
+			pointer, valid := program.sampler.Pointer()
+			if !valid {
+				pointer = input.Point{X: -1, Y: -1}
+			}
+			command, err = program.ui.Navigate(ctx, view, command, pointer, func(text string, size float64) float64 {
+				return float64(rl.MeasureTextEx(font, text, float32(size), 1).X)
+			})
+			if err != nil {
+				return err
+			}
+		}
+		if closeRequest && (!haveView || view.Data(ctx).State == session.StateTitle) {
+			frame := command.Data(ctx)
+			frame.Selections = []session.MenuSelection{{Action: "exit_game"}}
+			command, err = session.NewFrameCommand(ctx, frame)
+			if err != nil {
+				return err
+			}
+		}
+		view, err = program.session.HandleFrame(ctx, command)
+		if err != nil {
+			return err
+		}
+		haveView = true
+		data := view.Data(ctx)
+		if err = program.updateSettings(ctx, data); err != nil {
+			return err
+		}
+		if data.ExitRequested {
+			return nil
+		}
+		nextGroup := string(data.World.Location)
+		if data.Scene.Ending != "" || data.State == session.StateEnd {
+			nextGroup = "ending"
+		}
+		if nextGroup == "" {
+			nextGroup = "shared"
+		}
+		if nextGroup != group {
+			if err = program.cache.LoadLocation(ctx, nextGroup); err != nil {
+				return err
+			}
+			audioGroup := map[string]string{"shared": "shared", "ending": "ending", "LOC-HOS": "location-hos", "LOC-CHU": "location-chu", "LOC-MIN": "location-min", "LOC-INS": "location-ins"}[nextGroup]
+			if err = program.mixer.LoadGroup(ctx, audioGroup); err != nil {
+				return err
+			}
+			group = nextGroup
+		}
+		focused := rl.IsWindowFocused() && !rl.IsWindowMinimized() && !rl.IsWindowHidden()
+		if err = program.mixer.Update(ctx, view, audio.Frame{Elapsed: elapsed, Focused: focused, Dialogue: data.State == session.StateScene, Settings: program.values.Audio}); err != nil {
+			return err
+		}
+		fps := int32(60)
+		if rl.IsWindowMinimized() || rl.IsWindowHidden() {
+			fps = 15
+		}
+		if fps != targetFPS {
+			rl.SetTargetFPS(fps)
+			targetFPS = fps
+		}
+		rl.BeginDrawing()
+		rl.ClearBackground(rl.Black)
+		viewport, err = program.renderer.Draw(ctx, view, width, height, elapsed, program.values.Accessibility)
+		rl.EndDrawing()
+		if err != nil {
+			return err
+		}
+		if program.recorder != nil {
+			if err = program.recorder.Observe(ctx, diagnostics.FrameDuration, diagnostics.Dimensions{State: string(data.State)}, time.Since(started)); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+// updateSettings keeps player preferences separate from campaign commits. A
+// recovery display override is applied in memory, never written to the store.
+func (program *Program) updateSettings(ctx context.Context, view session.FrameViewData) (err error) {
+	defer mon.Task()(&ctx)(&err)
+	if draft, ok := program.ui.TakeSettingsDraft(ctx); ok {
+		if program.windowed {
+			draft.Display = program.savedDisplay
+		}
+		program.settingsDraft = &draft
+	}
+	store := program.store.Settings()
+	if program.settingsPending != "" {
+		result, pollErr := store.Poll(ctx, program.settingsPending)
+		if pollErr != nil {
+			return pollErr
+		}
+		data := result.Data(ctx)
+		if data.Status != session.StoragePending {
+			program.settingsPending = ""
+			if data.Status != session.StorageSucceeded {
+				if data.Code == "" {
+					return session.Internal
+				}
+				return data.Code
+			}
+			program.savedDisplay = data.Values.Display
+			values := data.Values
+			if program.windowed {
+				values.Display = settings.Display{Mode: settings.Windowed, Width: 1280, Height: 720, VSync: values.Display.VSync}
+			}
+			if values.Display != program.values.Display {
+				if err = program.window.Apply(ctx, values.Display); err != nil {
+					return err
+				}
+			}
+			if err = program.sampler.SetBindings(ctx, values); err != nil {
+				return err
+			}
+			if err = program.ui.SetSettings(ctx, values); err != nil {
+				return err
+			}
+			if err = program.ui.NotifySettingsResult(ctx, result); err != nil {
+				return err
+			}
+			program.values = values
+		}
+	}
+	if program.settingsPending != "" || program.settingsDraft == nil || view.Save == session.SavePending {
+		return nil
+	}
+	if program.settingsSequence == ^uint64(0) {
+		return session.Internal
+	}
+	program.settingsSequence++
+	id := session.RequestID(fmt.Sprintf("desktop-settings-%d", program.settingsSequence))
+	request, err := session.NewSettingsRequest(ctx, session.SettingsInput{ID: id, Kind: session.SaveSettings, Values: *program.settingsDraft})
+	if err != nil {
+		return err
+	}
+	if err = store.Submit(ctx, request); err != nil {
+		return err
+	}
+	program.settingsDraft = nil
+	program.settingsPending = id
+	return nil
 }
 
 // ShutdownStarted is closed before the program waits for owned work to drain.
@@ -263,6 +617,7 @@ func (program *Program) loadSettings(ctx context.Context, done <-chan struct{}) 
 				return data.Code
 			}
 			program.values = data.Values
+			program.savedDisplay = data.Values.Display
 			if program.windowed {
 				program.values.Display = settings.Display{Mode: settings.Windowed, Width: 1280, Height: 720, VSync: program.values.Display.VSync}
 			}
@@ -320,6 +675,22 @@ func (program *Program) Close() error {
 
 func (program *Program) close(ctx context.Context) (err error) {
 	defer mon.Task()(&ctx)(&err)
+	program.mu.Lock()
+	closed, closeErr := program.closed, program.closeErr
+	program.mu.Unlock()
+	if closed {
+		return closeErr
+	}
+	if program.ownerThread != 0 && nativeThreadID() != program.ownerThread {
+		program.beginShutdown(ctx)
+		program.mu.Lock()
+		cancel := program.runCancel
+		program.mu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+		return assets.ErrThread
+	}
 	program.beginShutdown(ctx)
 	program.closeOnce.Do(func() {
 		var failures []error
@@ -334,6 +705,12 @@ func (program *Program) close(ctx context.Context) (err error) {
 		if cancelLoop != nil {
 			cancelLoop()
 		}
+		// Run owns the session and stops the writer after its last frame.
+		// Waiting for it first prevents a concurrent Close from stopping the
+		// queue while that frame is still submitting accepted work.
+		if runDone != nil {
+			<-runDone
+		}
 		if done != nil {
 			stop()
 			// Store.Close alone may return at its drain deadline while the
@@ -344,11 +721,20 @@ func (program *Program) close(ctx context.Context) (err error) {
 			failures = append(failures, program.writerErr)
 			program.mu.Unlock()
 		}
-		if runDone != nil {
-			<-runDone
-		}
 		if program.store != nil {
 			failures = append(failures, program.store.Close())
+		}
+		if program.mixer != nil {
+			failures = append(failures, program.mixer.Close(ctx))
+		}
+		if program.renderer != nil {
+			failures = append(failures, program.renderer.Close(ctx))
+		}
+		if program.cache != nil {
+			failures = append(failures, program.cache.Close(ctx))
+		}
+		if program.window != nil {
+			failures = append(failures, program.window.Close(ctx))
 		}
 		if program.recorder != nil {
 			failures = append(failures, program.recorder.Close())
@@ -363,7 +749,12 @@ func (program *Program) close(ctx context.Context) (err error) {
 		if program.contentRoot != nil {
 			failures = append(failures, closeRoot(program.contentRoot))
 		}
+		program.mu.Lock()
 		program.closeErr = errs.Combine(failures...)
+		program.closed = true
+		program.mu.Unlock()
 	})
+	program.mu.Lock()
+	defer program.mu.Unlock()
 	return program.closeErr
 }

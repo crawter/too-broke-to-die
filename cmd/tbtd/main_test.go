@@ -140,6 +140,52 @@ func TestWatchdogBeginsOnParentOrExplicitShutdown(t *testing.T) {
 	}
 }
 
+// The desktop emits its shutdown notification before joining the writer. Keep
+// that join blocked here so only the production observer can start the budget.
+func TestObservedShutdownBlockedWriterSubprocess(t *testing.T) {
+	mode := os.Getenv("TBTD_OBSERVED_SHUTDOWN")
+	if mode != "" {
+		signals := make(chan os.Signal, 2)
+		budget := 250 * time.Millisecond
+		if mode == "second" {
+			budget = 30 * time.Second
+		}
+		watch := startWatchdog(context.Background(), signals, budget, func() { os.Exit(23) })
+		shutdown := make(chan struct{})
+		watch.observeShutdown(shutdown)
+		close(shutdown)
+		if mode == "second" {
+			go func() {
+				<-watch.ctx.Done()
+				signals <- os.Interrupt
+			}()
+		}
+		<-make(chan struct{}) // The accepted writer never completes.
+		os.Exit(24)
+	}
+	for _, mode := range []string{"deadline", "second"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestObservedShutdownBlockedWriterSubprocess$")
+			cmd.Env = append(os.Environ(), "TBTD_OBSERVED_SHUTDOWN="+mode)
+			start := time.Now()
+			output, err := cmd.CombinedOutput()
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 23 {
+				t.Fatalf("observer failed to start watchdog: %v %s", err, output)
+			}
+			elapsed := time.Since(start)
+			if mode == "deadline" && elapsed < 200*time.Millisecond {
+				t.Fatalf("deadline fired early: %v", elapsed)
+			}
+			if elapsed > 3*time.Second {
+				t.Fatalf("watchdog too slow: %v", elapsed)
+			}
+		})
+	}
+}
+
 func TestWatchdogSubprocess(t *testing.T) {
 	mode := os.Getenv("TBTD_WATCHDOG_TEST")
 	if mode != "" {

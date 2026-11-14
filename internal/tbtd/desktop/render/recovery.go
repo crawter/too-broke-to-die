@@ -5,6 +5,7 @@ package render
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -12,9 +13,56 @@ import (
 
 	"too-broke-to-die/internal/tbtd/campaign"
 	"too-broke-to-die/internal/tbtd/content"
-	"too-broke-to-die/internal/tbtd/desktop"
 	"too-broke-to-die/internal/tbtd/session"
 )
+
+// ErrorPresentation contains only safe player-facing information.
+type ErrorPresentation struct {
+	Code    session.ErrorCode
+	Message string
+	Choices []string
+}
+
+// PresentError classifies failures by identity without exposing causes or paths.
+func PresentError(err error) ErrorPresentation {
+	if err == nil {
+		return ErrorPresentation{}
+	}
+	code := session.Internal
+	for _, candidate := range []session.ErrorCode{session.InvalidAction, session.ContentInvalid, session.StorageDenied, session.StorageFull, session.StorageConflict, session.SaveCorrupt, session.SaveTooNew, session.ContentIncompatible, session.GraphicsUnavailable, session.AudioUnavailable, session.Internal} {
+		if errors.Is(err, candidate) {
+			code = candidate
+			break
+		}
+	}
+	if code == session.Internal && (content.ErrInvalid.Has(err) || errors.Is(err, content.ErrMissingReference) || content.Error.Has(err)) {
+		code = session.ContentInvalid
+	}
+	result := ErrorPresentation{Code: code}
+	switch code {
+	case session.InvalidAction:
+		result.Message = "Действие сейчас недоступно."
+	case session.ContentInvalid:
+		result.Message, result.Choices = "Не удалось загрузить необходимые материалы игры. Проверьте файлы игры.", []string{"retry", "exit"}
+	case session.StorageDenied:
+		result.Message, result.Choices = "Нет доступа к сохранению или профиль занят.", []string{"retry_save", "reload_saved", "exit_unsaved"}
+	case session.StorageFull:
+		result.Message, result.Choices = "Недостаточно места для сохранения.", []string{"retry_save", "reload_saved", "exit_unsaved"}
+	case session.StorageConflict:
+		result.Message, result.Choices = "Сохранение изменилось. Необходимо заново загрузить прогресс.", []string{"reload_saved", "exit_unsaved"}
+	case session.SaveCorrupt:
+		result.Message, result.Choices = "Не удалось прочитать сохранение. Повреждённые файлы сохранены.", []string{"choose_older", "new_game", "exit"}
+	case session.SaveTooNew, session.ContentIncompatible:
+		result.Message, result.Choices = "Сохранение несовместимо с этой версией игры. Файлы сохранены.", []string{"new_game", "exit"}
+	case session.GraphicsUnavailable:
+		result.Message, result.Choices = "Графическое устройство недоступно. Прогресс сохранён в последней подтверждённой версии.", []string{"exit"}
+	case session.AudioUnavailable:
+		result.Message, result.Choices = "Звук недоступен. Можно продолжить без звука или повторить попытку.", []string{"continue_silent", "retry_audio"}
+	default:
+		result.Message, result.Choices = "Произошла внутренняя ошибка. Загрузите сохранённый прогресс или выйдите.", []string{"reload_saved", "exit_unsaved"}
+	}
+	return result
+}
 
 func (ui *Interface) anchor(ctx context.Context, id content.AnchorID) (string, error) {
 	if id == "" {
@@ -189,7 +237,7 @@ func (ui *Interface) recovery(ctx context.Context, screen *Screen, data session.
 		}
 		return nil
 	}
-	screen.Lines = append(screen.Lines, desktop.PresentError(data.Error).Message)
+	screen.Lines = append(screen.Lines, PresentError(data.Error).Message)
 	if err := ui.savedSummary(ctx, screen, data.Progress); err != nil {
 		return err
 	}
